@@ -6,6 +6,7 @@
     lambert     Lambert solver and porkchop (launch window) searches
     trajectory  coasting through SOIs, burns, fuel, the orbit test
     planning    burns a planner works out: departures, aiming at a body, capture
+    assist      gravity assists: route search, flyby geometry, the set-up burn
 
 Units everywhere: km, km/s, kg, seconds of ephemeris time (ET).
 """

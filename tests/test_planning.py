@@ -80,3 +80,61 @@ def test_capture_needs_a_visit(mars):
     traj = fly(start, CRAFT, [dep], depart + 30 * DAY)
     with pytest.raises(PlanningError, match="never reaches"):
         planning.capture_burn(traj, "Mars")
+
+
+@pytest.fixture(scope="module")
+def venus_plan():
+    """(parking-orbit start, burns, arrival time) of a 2,000 km Venus flyby."""
+    dep = ephemeris.str2et("2026-06-01") + np.arange(0, 400, 4) * DAY
+    tof = np.arange(80, 250, 4) * DAY
+    pc = porkchop("Earth", "Venus", dep, tof)
+    i, j = pc.best("fuel")
+    depart, arrive = pc.depart_et[i], pc.depart_et[i] + pc.tof[j]
+    start, dep_burn = planning.departure("Earth", depart, pc.v_inf_depart[i, j], 200)
+    first = fly(start, CRAFT, [dep_burn], depart + 10 * DAY)
+    st = first.state_at(planning.soi_exit_time(first, "Earth") + DAY)
+    aim, _ = planning.aim_burn(st, first.craft, "Venus", arrive, 2000)
+    return start, [dep_burn, aim], arrive
+
+
+@pytest.fixture(scope="module")
+def venus_flyby(venus_plan):
+    start, burns, arrive = venus_plan
+    return fly(start, CRAFT, burns, arrive + 300 * DAY)
+
+
+def test_positions_match_state_at(venus_flyby):
+    ets = np.linspace(venus_flyby.segments[0].start.et, venus_flyby.segments[-1].end_et, 40)
+    fast = venus_flyby.positions(ets)
+    slow = np.array([venus_flyby.state_at(t).to("Sun").r for t in ets])
+    assert np.allclose(fast, slow, atol=1e-6)
+    rel = venus_flyby.positions(ets, frame="Venus")
+    assert np.allclose(rel, np.array([venus_flyby.state_at(t).to("Venus").r for t in ets]), atol=1e-6)
+
+
+def test_closest_approach_finds_the_flyby(venus_flyby):
+    approaches = {a.body: a for a in planning.closest_approaches(venus_flyby)}
+    venus = approaches["Venus"]
+    seg = planning.first_visit(venus_flyby, "Venus")
+    assert venus.inside_soi
+    assert venus.altitude == pytest.approx(seg.start.elements.periapsis - BODIES["Venus"].radius, abs=1)
+    assert seg.start.et < venus.et < seg.end_et
+    # Leaving Earth isn't reported as passing it
+    assert "Earth" not in approaches or approaches["Earth"].et > seg.end_et
+    # Sorted by time
+    times = [a.et for a in planning.closest_approaches(venus_flyby)]
+    assert times == sorted(times)
+
+
+def test_approach_still_closing_at_the_end_is_flagged(venus_plan):
+    # Stop the projection 20 days before Venus: the nearest point is just the last moment
+    start, burns, arrive = venus_plan
+    cut = fly(start, CRAFT, burns, arrive - 20 * DAY)
+    venus = next(a for a in planning.closest_approaches(cut) if a.body == "Venus")
+    assert venus.at_end
+    assert venus.et == pytest.approx(cut.segments[-1].end_et)
+
+
+def test_full_flyby_is_not_flagged_as_at_end(venus_flyby):
+    venus = next(a for a in planning.closest_approaches(venus_flyby) if a.body == "Venus")
+    assert not venus.at_end

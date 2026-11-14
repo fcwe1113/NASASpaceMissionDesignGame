@@ -5,6 +5,8 @@ campaign until Schedule/Save, and saving an active mission goes through
 Mission.set_plan, which refuses changes to burns that have already happened.
 """
 import copy
+import math
+from types import SimpleNamespace
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -13,12 +15,15 @@ import numpy as np
 from game.mission import ACTIVE, PENDING, Mission, PlanError
 from physics import BODIES, Burn, Craft, LONG_BURN, ephemeris, fly, porkchop
 from physics import planning
+from physics.assist import assist_search
 from physics.planning import PlanningError
+from system_map import SystemMap
 
 DAY = 86_400.0
 TARGETS = ["Earth orbit", "Moon", "Mercury", "Venus", "Mars"]
 # Flight-time range (days) searched for each planet
 TOF_RANGE = {"Mercury": (60, 200), "Venus": (70, 250), "Mars": (120, 450)}
+ASSIST_LEG2_RANGE = (80, 500)      # days from the flyby planet on to the target
 DEFAULT_CRAFT = Craft(dry_mass=2000, fuel=12_000, isp=320, thrust=50_000)
 PREVIEW_KEY = "__preview__"
 
@@ -101,7 +106,13 @@ class PorkchopChart(tk.Canvas):
             out.append(f"#{r:02x}{g:02x}30")
         return out
 
-    def show(self, pc, max_dv):
+    def clear(self):
+        self.pc = None
+        self.delete("all")
+        self.create_text(self.LEFT + self.W / 2, self.TOP + self.H / 2, fill="#888",
+                         text="Find launch windows to see the chart", tags="hint")
+
+    def show(self, pc, max_dv, x_label="Departure date"):
         self.pc = pc
         self.delete("all")
         dv = pc.dv_total
@@ -139,7 +150,7 @@ class PorkchopChart(tk.Canvas):
             self.create_text(self.LEFT - 4, y, text=f"{pc.tof[j] / DAY:.0f} d", fill="#ccc", anchor="e",
                              font=("TkDefaultFont", 7))
         self.create_text(self.LEFT + self.W / 2, self.TOP + self.H + 25, fill="#ccc",
-                         text=f"Departure date   (green = cheap, {vmin:.1f} km/s; dim = more than the craft can do)",
+                         text=f"{x_label}   (green = cheap, {vmin:.1f} km/s; dim = beyond the craft)",
                          font=("TkDefaultFont", 7))
 
     @staticmethod
@@ -219,10 +230,10 @@ class MissionPlanner(tk.Toplevel):
         self.original = mission
         self.draft = copy.deepcopy(mission) if mission else None
         self.pc = None
-        self.pc_pick = None
+        self.assist_grid = None        # gravity-assist search behind the chart, if "Via" is set
         self.title(f"Mission: {mission.name}" if mission else "New mission")
-        self.geometry("1300x800")
-        self.minsize(1270, 740)
+        self.geometry("1360x820")
+        self.minsize(1330, 760)
 
         # Pause the clock while planning; restore it on close
         self._was_paused = self.view.paused
@@ -238,8 +249,16 @@ class MissionPlanner(tk.Toplevel):
         self._build_mission(left)
         self._build_craft(left)
         self._build_launch(left)
-        self._build_burns(right)
-        self._build_projection(right)
+        self._build_summary(right)
+        tabs = ttk.Notebook(right)
+        tabs.pack(fill="both", expand=True, pady=(6, 0))
+        plan_tab = ttk.Frame(tabs, padding=4)
+        tabs.add(plan_tab, text="Burns & events")
+        self._build_burns(plan_tab)
+        self._build_projection(plan_tab)
+        self.system_map = SystemMap(tabs, on_aim=lambda body, et: self._aim(body, et),
+                                    on_assist=lambda body, et: self._gravity_assist(body, et))
+        tabs.add(self.system_map, text="System map")
         self._build_buttons()
 
         self.status = ttk.Label(self, foreground="#a33", wraplength=1100, padding=(8, 0))
@@ -300,6 +319,14 @@ class MissionPlanner(tk.Toplevel):
             self.search_span.pack(anchor="w")
             self.arrive_alt = LabeledEntry(box, "Pass target at", 300, unit="km altitude")
             self.arrive_alt.pack(anchor="w")
+            via_row = ttk.Frame(box)
+            via_row.pack(anchor="w")
+            ttk.Label(via_row, text="Via (gravity assist)", width=16).pack(side="left")
+            self.via = tk.StringVar(value="None")
+            via_box = ttk.Combobox(via_row, textvariable=self.via, state="readonly", width=12,
+                                   values=["None"] + [p for p in ("Mercury", "Venus", "Mars") if p != target])
+            via_box.pack(side="left")
+            via_box.bind("<<ComboboxSelected>>", lambda e: self._via_changed())
             row = ttk.Frame(box)
             row.pack(anchor="w", pady=4)
             self.find_btn = ttk.Button(row, text="Find launch windows", command=self._find_windows)
@@ -354,6 +381,7 @@ class MissionPlanner(tk.Toplevel):
             ttk.Button(row, text="Edit…", command=self._edit_burn),
             ttk.Button(row, text="Delete", command=self._delete_burn),
             ttk.Button(row, text="Aim at a body…", command=self._aim),
+            ttk.Button(row, text="Gravity assist…", command=self._gravity_assist),
             ttk.Button(row, text="Capture into orbit…", command=self._capture),
         ]
         for b in self.burn_buttons:
@@ -363,6 +391,13 @@ class MissionPlanner(tk.Toplevel):
             f"take longer than {LONG_BURN / DAY:.0f} day are simulated as they happen; shorter "
             "ones are instant. Burns already carried out are locked.")).pack(anchor="w", pady=(4, 0))
 
+    def _build_summary(self, parent):
+        """How the plan ends and the fuel left; above the tabs so both show it."""
+        self.outcome = ttk.Label(parent, font=("TkDefaultFont", 11, "bold"), wraplength=740, justify="left")
+        self.outcome.pack(anchor="w")
+        self.fuel_left = ttk.Label(parent)
+        self.fuel_left.pack(anchor="w")
+
     def _build_projection(self, parent):
         box = ttk.LabelFrame(parent, text="Projected flight", padding=6)
         box.pack(fill="both", expand=True, pady=(8, 0))
@@ -371,10 +406,6 @@ class MissionPlanner(tk.Toplevel):
         self.horizon = LabeledEntry(row, "Show path until T+", 30, unit="days")
         self.horizon.pack(side="left")
         ttk.Button(row, text="Update", command=self._set_horizon).pack(side="left", padx=6)
-        self.outcome = ttk.Label(box, font=("TkDefaultFont", 11, "bold"), wraplength=680, justify="left")
-        self.outcome.pack(anchor="w", pady=(6, 0))
-        self.fuel_left = ttk.Label(box)
-        self.fuel_left.pack(anchor="w")
         self.event_tree = ttk.Treeview(box, columns=("when", "tplus", "event", "body", "note"),
                                        show="headings", height=8, selectmode="none")
         for key, text, width in [("when", "Date (UTC)", 130), ("tplus", "T+ days", 70),
@@ -451,7 +482,7 @@ class MissionPlanner(tk.Toplevel):
 
     def _target_changed(self):
         self.draft = None
-        self.pc = None
+        self.pc = self.assist_grid = None
         self._launch_widgets()
         self._refresh()
 
@@ -463,6 +494,11 @@ class MissionPlanner(tk.Toplevel):
         span = parse_float(self.search_span.get(), "Search span")
         if not 10 <= span <= 5000:
             raise PlanError("Search span must be between 10 and 5000 days")
+        via = self.via.get()
+        if via != "None":
+            self._find_assist_windows(target, via, start, span)
+            return
+        self.assist_grid = None
         lo, hi = TOF_RANGE[target]
         dep = start + np.linspace(0, span, 250) * DAY
         dep = dep[dep < ephemeris.COVER_MAX - hi * DAY]
@@ -471,17 +507,71 @@ class MissionPlanner(tk.Toplevel):
         self.chart.show(self.pc, self._craft().dv_remaining)
         self._pick_best("fuel")
 
+    def _find_assist_windows(self, target, via, start, span):
+        """Search Earth -> via -> target routes; chart = best route per (flyby date, leg-1 time)."""
+        lo1, hi1 = TOF_RANGE[via]
+        lo2, hi2 = ASSIST_LEG2_RANGE
+        flyby = start + lo1 * DAY + np.arange(0, span, max(2.0, span / 200)) * DAY
+        flyby = flyby[flyby < ephemeris.COVER_MAX - hi2 * DAY]
+        grid = assist_search("Earth", via, target, flyby, np.linspace(lo1, hi1, 40) * DAY,
+                             np.linspace(lo2, hi2, 40) * DAY)
+        self.assist_grid = grid
+        total = grid.dv_total
+        # The chart shows, for each (flyby date, leg-1 time), the cheapest leg-2 time
+        self.pc = SimpleNamespace(dv_total=total.min(axis=2), depart_et=grid.flyby_et, tof=grid.tof1,
+                                  best_k=total.argmin(axis=2))
+        self.chart.show(self.pc, self._craft().dv_remaining,
+                        x_label=f"{via} flyby date (y: days from Earth to {via})")
+        self._pick_best("fuel")
+
+    def _via_changed(self):
+        self.pc = self.assist_grid = None
+        self.chart.clear()
+        self.pick_info.config(text="")
+
     @_guard
     def _pick_best(self, by):
         if self.pc is None:
             raise PlanError("Find launch windows first")
-        idx = self.pc.best(by, max_dv=self._craft().dv_remaining if by == "speed" else np.inf)
+        max_dv = self._craft().dv_remaining if by == "speed" else np.inf
+        if self.assist_grid is not None:
+            idx = self.assist_grid.best(by, max_dv=max_dv)
+            if idx is None:
+                raise PlanError("No route on the chart is affordable with this craft")
+            self._pick_assist(*idx)
+            return
+        idx = self.pc.best(by, max_dv=max_dv)
         if idx is None:
             raise PlanError("No transfer on the chart is affordable with this craft")
         self._pick(*idx)
 
     @_guard
+    def _pick_assist(self, f, m, k):
+        g = self.assist_grid
+        if not np.isfinite(g.dv_total[f, m, k]):
+            raise PlanError("No route there (the flyby would have to pass too low)")
+        self.chart.mark(f, m)
+        dep, fb, arr = g.route(f, m, k)
+        via, target = g.via, g.target
+        self.pick_info.config(text=(
+            f"Leave {date_str(dep)}, pass {via} {date_str(fb)}, arrive {date_str(arr)} "
+            f"({(arr - dep) / DAY:.0f} days)\n"
+            f"Departure {g.dv_depart[f, m]:.2f} km/s, flyby top-up {g.dv_flyby[f, m, k]:.2f}, "
+            f"orbit capture {g.dv_arrive[f, k]:.2f}, total {g.dv_total[f, m, k]:.2f} km/s; "
+            f"{via} pass {g.flyby_alt[f, m, k]:,.0f} km up"))
+        alt = parse_float(self.arrive_alt.get(), "Pass altitude")
+        draft = Mission.via_assist(self.name.get().strip() or "Mission", target, self._craft(),
+                                   dep, fb, arr, g.v_inf_depart[f, m], via, alt)
+        self._info(f"Gravity assist planned: {via} bends the path {draft.assist.turn_deg:.0f}°. "
+                   f"Burns: departure, flyby set-up, a touch-up after {via}. "
+                   f"Add a capture burn to stay at {target}.")
+        self._set_draft(draft)
+
+    @_guard
     def _pick(self, i, j):
+        if self.assist_grid is not None:
+            self._pick_assist(i, j, int(self.pc.best_k[i, j]))
+            return
         pc = self.pc
         dep, tof = pc.depart_et[i], pc.tof[j]
         if not np.isfinite(pc.dv_total[i, j]):
@@ -599,15 +689,21 @@ class MissionPlanner(tk.Toplevel):
         return [target] + others if target in BODIES else others
 
     @_guard
-    def _aim(self):
+    def _aim(self, body=None, arrive=None):
+        """Aim dialog; the system map pre-fills `body` and `arrive` from a closest approach."""
         self._need_draft()
         d = self.draft
-        exit_et = planning.soi_exit_time(d.trajectory, "Earth")
-        start = max(self.now + 60, (exit_et + DAY) if exit_et else d.launch_et)
-        visit = planning.first_visit(d.trajectory, self._target_body())
-        arrive = visit.start.et if visit else start + 200 * DAY
+        choices = self._body_choices()
+        if body is not None:
+            choices = [body] + [b for b in choices if b != body]
+            start = self._default_aim_time(arrive)
+        else:
+            exit_et = planning.soi_exit_time(d.trajectory, "Earth")
+            start = max(self.now + 60, (exit_et + DAY) if exit_et else d.launch_et)
+            visit = planning.first_visit(d.trajectory, self._target_body())
+            arrive = visit.start.et if visit else start + 200 * DAY
         res = FormDialog(self, "Aim at a body", [
-            ("body", "Body", self._body_choices(), ""),
+            ("body", "Body", choices, ""),
             ("t", "Burn at", f"{(start - d.launch_et) / DAY:.2f}", "days after launch"),
             ("arrive", "Arrive at", f"{(arrive - d.launch_et) / DAY:.2f}", "days after launch"),
             ("alt", "Closest approach", "300", "km altitude"),
@@ -633,6 +729,52 @@ class MissionPlanner(tk.Toplevel):
         self._refresh()
         self._info(f"Aimed at {res['body']}: closest approach {got:.0f} km"
                    + (f"; removed {dropped} later burn(s)" if dropped else ""))
+
+    @_guard
+    def _gravity_assist(self, via=None, flyby=None):
+        """Dialog: fly past `via` so it bends the path on to a target. The map pre-fills via/flyby."""
+        self._need_draft()
+        d = self.draft
+        planets = ["Mercury", "Venus", "Mars"]
+        if via is None:
+            # Default to the first planet the plan already passes, if any
+            passes = [a for a in planning.closest_approaches(d.trajectory) if a.body in planets]
+            via, flyby = (passes[0].body, passes[0].et) if passes else ("Venus", None)
+        burn_default = self._default_aim_time(flyby) if flyby else self._default_aim_time(math.inf)
+        if flyby is None:
+            flyby = burn_default + 120 * DAY
+        targets = [self._target_body()] + [b for b in planets + ["Earth"] if b != self._target_body()]
+        res = FormDialog(self, "Gravity assist", [
+            ("via", "Fly past", [via] + [p for p in planets if p != via], ""),
+            ("t", "Set-up burn at", f"{(burn_default - d.launch_et) / DAY:.2f}", "days after launch"),
+            ("flyby", "Pass it at", f"{(flyby - d.launch_et) / DAY:.2f}", "days after launch"),
+            ("target", "Then go to", [t for t in targets if t != via], ""),
+            ("arrive", "Arrive at", "auto", "days after launch (auto = cheapest that works)"),
+            ("alt", "Pass target at", "300", "km altitude"),
+        ], note="Works out the pass that makes the planet bend your path towards the target, "
+                "the burn that sets it up, and a small touch-up after the flyby. Later burns "
+                "are replaced. The System map's closest-approach table can fill in the first "
+                "two times; Find launch windows with 'Via' set plans the whole route.").ask()
+        if res is None:
+            return
+        if res["via"] == res["target"]:
+            raise PlanError("Fly past one body to reach another")
+        t = d.launch_et + parse_float(res["t"], "Set-up burn time") * DAY
+        self._check_not_past(t)
+        arrive = res["arrive"].strip().lower()
+        arrive_et = None if arrive in ("", "auto") else d.launch_et + parse_float(arrive, "Arrival time") * DAY
+        note = d.add_assist(t, res["via"], d.launch_et + parse_float(res["flyby"], "Pass time") * DAY,
+                            res["target"], arrive_et, parse_float(res["alt"], "Pass altitude"))
+        self.horizon.set(f"{(d.horizon_et - d.launch_et) / DAY:.0f}")
+        self._refresh()
+        self._info(note)
+
+    def _default_aim_time(self, arrive):
+        """A day after the last thing that happens before `arrive` (a burn, or leaving an SOI)."""
+        d = self.draft
+        before = [e.et for e in d.trajectory.events if e.kind in ("burn", "soi_exit") and e.et < arrive]
+        last = max(before + [d.launch_et, self.now if self.launched else d.launch_et])
+        return last + DAY if last + DAY < arrive else (last + arrive) / 2
 
     @_guard
     def _capture(self):
@@ -670,6 +812,7 @@ class MissionPlanner(tk.Toplevel):
             self.outcome.config(text="No launch planned yet")
             self.fuel_left.config(text="")
             self.view.remove_path(PREVIEW_KEY)
+            self.system_map.clear()
             return
         for k, b in enumerate(d.burns):
             dur = d.burn_time(b)
@@ -694,6 +837,7 @@ class MissionPlanner(tk.Toplevel):
         if hasattr(self, "declare_btn"):
             self.declare_btn.config(state="normal" if self.original.can_declare_complete(self.now) else "disabled")
         self.view.show_path(PREVIEW_KEY, f"{self.name.get()} (plan)", traj, self.page.PREVIEW_COLOR, thickness=2)
+        self.system_map.set_trajectory(traj, [b.et for b in d.burns])
 
     @staticmethod
     def _capture_hint(mission, body):

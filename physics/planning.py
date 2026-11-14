@@ -4,6 +4,7 @@ Every mission starts in a circular parking orbit around Earth at launch time
 (getting there is the launch vehicle's job). From there the plan is just a list
 of burns, so the departure burn is fuel-accounted and locked like any other.
 """
+from dataclasses import dataclass
 import math
 
 import numpy as np
@@ -65,14 +66,16 @@ def first_visit(traj, target):
     return next((s for s in traj.segments if s.body == target and isinstance(s, CoastSegment)), None)
 
 
-def aim_burn(state, craft, target, et_arrive, periapsis_alt, side=1, iterations=8):
+def aim_burn(state, craft, target, et_arrive, periapsis_alt, side=1, iterations=8, offset_dir=None):
     """An instant burn at `state` that reaches `target` passing `periapsis_alt` km above it.
 
     `state` is the craft just before the burn; it must be orbiting the target's
     parent (e.g. past Earth's SOI, around the Sun, for Mars). The aim point is
     offset from the target's centre across the approach direction, then refined
     by flying the result until the actual closest approach matches.
-    `side` (+1/-1) picks which side of the target to pass.
+    `side` (+1/-1) picks which side of the target to pass, in the ecliptic;
+    `offset_dir` (a vector, km/s frame) overrides it with any side at all, which
+    is what a gravity assist needs (see assist.assist_burn).
     Returns (burn, achieved periapsis altitude in km).
     """
     t = BODIES[target]
@@ -86,10 +89,14 @@ def aim_burn(state, craft, target, et_arrive, periapsis_alt, side=1, iterations=
     v_inf = v2 - vt
     vi = np.linalg.norm(v_inf)
     u = v_inf / vi
-    perp = np.cross(u, [0.0, 0.0, 1.0])
-    if np.linalg.norm(perp) < 1e-6:
-        perp = np.cross(u, [1.0, 0.0, 0.0])
-    perp = side * perp / np.linalg.norm(perp)
+    if offset_dir is not None:
+        perp = np.asarray(offset_dir, float)
+        perp = perp - (perp @ u) * u                 # only the part across the approach counts
+    else:
+        perp = side * np.cross(u, [0.0, 0.0, 1.0])
+        if np.linalg.norm(perp) < 1e-6:
+            perp = side * np.cross(u, [1.0, 0.0, 0.0])
+    perp = perp / np.linalg.norm(perp)
 
     # Impact parameter that gives this periapsis for a hyperbola with excess speed vi
     rp_goal = t.radius + periapsis_alt
@@ -98,9 +105,13 @@ def aim_burn(state, craft, target, et_arrive, periapsis_alt, side=1, iterations=
     burn, rp = None, None
     for _ in range(iterations):
         burn = correction_burn(state, target, et_arrive, aim_offset=b * perp)
+        if burn.dv > craft.dv_remaining:
+            raise PlanningError(f"Reaching {target} then needs a {burn.dv:.2f} km/s burn, but the craft "
+                                f"only has {craft.dv_remaining:.2f} km/s left")
         seg = first_visit(fly(state, craft, [burn], look), target)
         if seg is None:
-            raise PlanningError(f"Couldn't reach {target}'s sphere of influence from here")
+            raise PlanningError(f"Couldn't reach {target}'s sphere of influence from here by that "
+                                f"arrival time; try a different arrival time or burn time")
         rp = seg.start.elements.periapsis
         if abs(rp - rp_goal) < 1.0:
             break
@@ -122,6 +133,81 @@ def capture_burn(traj, target):
     if peri.elements.periapsis <= BODIES[target].radius:
         raise PlanningError(f"The plan hits {target}; aim for a higher pass first")
     return Burn(peri.et, prograde=-capture_dv(peri))
+
+
+FLYBY_BODIES = ("Mercury", "Venus", "Earth", "Mars", "Moon")
+
+
+@dataclass
+class Approach:
+    body: str
+    et: float
+    distance: float          # km between centres
+    at_end: bool = False     # still closing in when the trajectory (projection) ends
+
+    @property
+    def altitude(self):
+        return self.distance - BODIES[self.body].radius
+
+    @property
+    def inside_soi(self):
+        return self.distance < BODIES[self.body].soi
+
+
+def closest_approaches(traj, names=FLYBY_BODIES, samples=2000):
+    """The closest the craft gets to each body over the whole trajectory, by time.
+
+    The body the flight starts at only counts once the craft has left its SOI
+    (otherwise every mission would "pass" Earth at launch). Coarse samples find
+    each minimum; a golden-section search then pins it down.
+    """
+    t_start, t_end = traj.segments[0].start.et, traj.segments[-1].end_et
+    ets = np.linspace(t_start, t_end, samples)
+    craft = traj.positions(ets)
+    launch_body = traj.segments[0].body
+    out = []
+    for name in names:
+        t_from = t_start
+        if name == launch_body:
+            t_from = soi_exit_time(traj, name)
+            if t_from is None:
+                continue
+        mask = ets >= t_from
+        if not mask.any():
+            continue
+        rb, _ = bodies.heliocentric_state(name, ets[mask])
+        d = np.linalg.norm(craft[mask] - rb, axis=1)
+        i = int(np.argmin(d))
+        if i == 0:
+            continue                 # only getting further away: where we started, not a pass
+        local = ets[mask]
+        if i == len(local) - 1:
+            out.append(Approach(name, local[-1], float(d[-1]), at_end=True))
+            continue
+        lo, hi = local[max(i - 1, 0)], local[i + 1]
+        et = _golden_min(lambda t: _distance(traj, name, t), lo, hi)
+        out.append(Approach(name, et, _distance(traj, name, et)))
+    return sorted(out, key=lambda a: a.et)
+
+
+def _distance(traj, name, et):
+    return float(np.linalg.norm(traj.positions([et])[0] - bodies.heliocentric_state(name, et)[0]))
+
+
+def _golden_min(f, lo, hi, tol=1.0):
+    g = (math.sqrt(5) - 1) / 2
+    a, b = lo + (1 - g) * (hi - lo), lo + g * (hi - lo)
+    fa, fb = f(a), f(b)
+    while hi - lo > tol:
+        if fa < fb:
+            hi, b, fb = b, a, fa
+            a = lo + (1 - g) * (hi - lo)
+            fa = f(a)
+        else:
+            lo, a, fa = a, b, fb
+            b = lo + g * (hi - lo)
+            fb = f(b)
+    return (lo + hi) / 2
 
 
 def soi_exit_time(traj, body):

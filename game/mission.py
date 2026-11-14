@@ -11,10 +11,12 @@ Missions are deterministic: the whole flight is re-flown from launch with the
 current plan, and since past burns can't change, neither can the past path.
 """
 from dataclasses import dataclass, field
+from itertools import groupby
 import math
 
 from physics import BODIES, Burn, Craft, State, fly, is_stable_orbit, parking_orbit
-from physics import kepler, planning
+from physics import assist, kepler, planning
+from physics.trajectory import CoastSegment
 
 PENDING, ACTIVE, COMPLETE, LOST = "pending", "active", "complete", "lost"
 PARKING_ALT = 200.0          # km, where every mission starts
@@ -63,6 +65,7 @@ class Mission:
             self.horizon_et = self.launch_et + 30 * DAY
         self._traj = None
         self.now = -math.inf           # sim time of the last update()
+        self.assist = None             # the last gravity assist planned (assist.AssistPlan)
 
     # ---------- Construction ----------
     @classmethod
@@ -70,6 +73,54 @@ class Mission:
         """Departure burn onto a porkchop transfer (correction/capture burns are added separately)."""
         start, dep = planning.departure("Earth", depart_et, v_inf, PARKING_ALT)
         return cls(name, target, craft, start, [dep], horizon_et=arrive_et + 30 * DAY)
+
+    @classmethod
+    def via_assist(cls, name, target, craft, depart_et, flyby_et, arrive_et, v_inf, via, arrive_alt=300.0):
+        """Departure, the burn that sets up a gravity assist at `via`, and the touch-up after it.
+
+        Raises PlanningError if the craft can't afford the burns or the flyby is impossible.
+        """
+        start, dep = planning.departure("Earth", depart_et, v_inf, PARKING_ALT)
+        m = cls(name, target, craft, start, [dep], horizon_et=arrive_et + 30 * DAY)
+        exit_et = planning.soi_exit_time(fly(start, craft, [dep], depart_et + 30 * DAY), "Earth")
+        if exit_et is None or exit_et + DAY >= flyby_et:
+            raise planning.PlanningError("The craft doesn't leave Earth in time for the flyby")
+        m.add_assist(exit_et + DAY, via, flyby_et, target, arrive_et, arrive_alt)
+        return m
+
+    def add_assist(self, burn_et, via, flyby_et, target, arrive_et=None, arrive_alt=300.0):
+        """Plan a gravity assist from `burn_et`: a burn setting up the flyby of `via`, and a
+        touch-up a day after leaving it, aimed at `target`. Later burns are replaced.
+        With arrive_et=None, the cheapest workable arrival time is chosen.
+
+        Returns a note on what happened (e.g. if the touch-up couldn't be worked out).
+        Raises PlanningError if the flyby itself can't be set up.
+        """
+        earlier = [b for b in self.burns if b.et < burn_et]
+        before = fly(self.start, self.craft, earlier, burn_et)
+        if before.end_reason == "impact":
+            raise planning.PlanningError("The craft has already landed by then")
+        if arrive_et is None:
+            arrive_et = assist.best_arrival(before.end, via, flyby_et, target)
+        setup = assist.assist_burn(before.end, before.craft, via, flyby_et, target, arrive_et)
+        self.set_plan(earlier + [setup.burn], horizon_et=max(self.horizon_et, arrive_et + 30 * DAY))
+        self.assist = setup
+        note = (f"{via} bends the path {setup.turn_deg:.0f}° with a pass {setup.flyby_alt:,.0f} km up, "
+                f"arriving {(arrive_et - self.launch_et) / DAY:.0f} days after launch")
+        # Patched conics leave a small error; aim properly a day after leaving the flyby planet
+        out_et = planning.soi_exit_time(self.trajectory, via)
+        if out_et is None:
+            return note + f"; but the craft doesn't come back out of {via}'s sphere of influence"
+        before = fly(self.start, self.craft, self.burns, out_et + DAY)
+        try:
+            touch_up, alt = planning.aim_burn(before.end, before.craft, target, arrive_et, arrive_alt)
+        except planning.PlanningError as exc:
+            return note + f"; no touch-up towards {target}: {exc}"
+        self.set_plan(self.burns + [touch_up])
+        note += f"; touch-up of {touch_up.dv * 1000:.0f} m/s after it to pass {target} at {alt:,.0f} km"
+        if setup.dv_flyby > 0.05:
+            note += f" (includes making up {setup.dv_flyby * 1000:.0f} m/s the flyby can't give)"
+        return note
 
     @classmethod
     def to_moon(cls, name, craft, depart_et, tof, periapsis_alt=100.0):
@@ -111,22 +162,28 @@ class Mission:
         body = traj.stable_orbit()
         if body:
             return Outcome("orbit", body, traj.segments[-1].start.et)
-        flyby = self._target_flyby()
+        flyby = self._final_flyby()
         if flyby:
             return flyby
         return Outcome("in_flight", end.body, end.et)
 
-    def _target_flyby(self):
-        """The first pass through the target's SOI that leaves it again, as an Outcome."""
-        if self.target == self.start.body:
-            return None                                  # leaving the launch body isn't a flyby
-        seg = planning.first_visit(self.trajectory, self.target)
-        if seg is None or seg.end_reason != "soi_exit":
+    def _final_flyby(self):
+        """The last body the craft passes and leaves again (e.g. Mars after a Venus assist).
+
+        The launch body and the Sun don't count: leaving Earth isn't a flyby.
+        """
+        visits = [(body, list(segs)) for body, segs in groupby(self.trajectory.segments, key=lambda s: s.body)]
+        visits = [(b, segs) for b, segs in visits if b not in ("Sun", self.start.body)]
+        if not visits:
             return None
-        s = seg.start
+        body, segs = visits[-1]
+        coast = next((s for s in segs if isinstance(s, CoastSegment)), None)
+        if coast is None or segs[-1].end_reason != "soi_exit":
+            return None
+        s = coast.start
         dt = kepler.time_to_periapsis(s.r, s.v, s.mu)
-        et = s.et + dt if dt is not None and s.et + dt <= seg.end_et else s.et
-        return Outcome("flyby", self.target, et, s.elements.periapsis - BODIES[self.target].radius)
+        et = s.et + dt if dt is not None and s.et + dt <= coast.end_et else s.et
+        return Outcome("flyby", body, et, s.elements.periapsis - BODIES[body].radius)
 
     @property
     def end_et(self):

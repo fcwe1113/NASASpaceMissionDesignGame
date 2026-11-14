@@ -192,6 +192,25 @@ class Trajectory:
     def state_at(self, et):
         return self.segment_at(et).state_at(et)
 
+    def positions(self, ets, frame="Sun"):
+        """Craft positions (N, 3) at times `ets`, relative to `frame` at each of those times.
+
+        Body positions are fetched once per segment for all its times, so this is
+        much faster than calling state_at(...).to(frame) in a loop.
+        """
+        ets = np.asarray(ets, float)
+        out = np.empty((len(ets), 3))
+        ends = np.array([seg.end_et for seg in self.segments])
+        idx = np.minimum(np.searchsorted(ends, ets), len(self.segments) - 1)
+        for k in np.unique(idx):
+            seg, mask = self.segments[k], idx == k
+            ts = ets[mask]
+            rel = np.array([seg.state_at(t).r for t in ts])
+            if seg.body != frame:
+                rel = rel + bodies.heliocentric_state(seg.body, ts)[0] - bodies.heliocentric_state(frame, ts)[0]
+            out[mask] = rel
+        return out
+
     def sample(self, n_per_segment=100, frame="Sun"):
         """(ets, positions) along the whole flight, relative to `frame`, for drawing."""
         ets, pts = [], []
