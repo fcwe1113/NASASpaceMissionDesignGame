@@ -3,6 +3,16 @@ name = "nasaspacemissiondesigngame"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "numpy>=2.5.4",
     "spiceypy>=8.4.0",
     "ursina>=8.3.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
 ]

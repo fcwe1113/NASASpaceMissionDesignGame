@@ -9,20 +9,14 @@ Mouse controls inside the view:
     Right-drag      orbit camera      Scroll       zoom
     Middle-drag     pan (free camera only)
 """
-from pathlib import Path
-
 from panda3d.core import WindowProperties, loadPrcFileData
 from ursina import *
 import spiceypy as spice
 import numpy as np
 
 # ---------- Ephemeris ----------
-HERE = Path(__file__).resolve().parent
-# de440.bsp covers 1550-2650; the smaller de440s.bsp (1849-2150) is the fallback
-EPHEMERIS = next((HERE / f for f in ("de440.bsp", "de440s.bsp") if (HERE / f).exists()),
-                 HERE / "de440.bsp")
-spice.furnsh(str(HERE / "naif0012.tls"))
-spice.furnsh(str(EPHEMERIS))
+# physics.ephemeris loads the kernels and knows the time span they cover
+from physics.ephemeris import COVER_MIN, COVER_MAX
 
 AU_KM = 149_597_870.7
 C_KM_S = 299_792.458
@@ -31,11 +25,7 @@ SCALE = AU_KM / KM_PER_UNIT      # game units per AU (~149,598)
 MOON_EXAG = 1.0                  # true Moon distance
 DAY = 86_400.0
 
-# Exact time span the ephemeris file covers (trails are clipped to this)
-_cov = spice.wnfetd(spice.spkcov(str(EPHEMERIS), 3), 0)
-COVER_MIN, COVER_MAX = _cov[0] + DAY, _cov[1] - DAY
-
-ET_MIN, ET_MAX = COVER_MIN, COVER_MAX   # sim clock stays inside the coverage
+ET_MIN, ET_MAX = COVER_MIN, COVER_MAX   # sim clock stays inside the coverage (trails are clipped to it too)
 
 #           SPICE id, period (days), body colour,  orbit-line colour,       mean radius (km)
 PLANETS = {
