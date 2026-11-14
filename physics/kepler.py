@@ -28,6 +28,43 @@ def stumpff_s(z):
     return 1 / 6 - z / 120
 
 
+def _initial_chi(rn, vr, alpha, mu, dt):
+    """Starting guess for the universal anomaly (Vallado, algorithm 8)."""
+    sqmu = math.sqrt(mu)
+    if alpha > 1e-12:                                    # ellipse
+        return sqmu * alpha * dt
+    if alpha < -1e-12:                                   # hyperbola
+        a = 1 / alpha
+        sign = 1.0 if dt > 0 else -1.0
+        arg = (-2 * mu * alpha * dt) / (rn * vr + sign * math.sqrt(-mu * a) * (1 - rn * alpha))
+        if arg > 0:
+            return sign * math.sqrt(-a) * math.log(arg)
+    return sqmu * dt / rn                                # (near-)parabola
+
+
+def _bisect_chi(kepler_eq, dt):
+    """Fallback root-finder: F(chi) rises monotonically, so bracket and bisect."""
+    def f_at(chi):
+        try:
+            return kepler_eq(chi)[0]
+        except OverflowError:
+            return math.copysign(math.inf, chi)
+    sign = 1.0 if dt > 0 else -1.0
+    lo, hi = 0.0, sign
+    while sign * f_at(hi) < 0:
+        lo, hi = hi, hi * 2
+    lo, hi = min(lo, hi), max(lo, hi)
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        if f_at(mid) < 0:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-12 * max(1.0, abs(mid)):
+            break
+    return (lo + hi) / 2
+
+
 def propagate(r0, v0, dt, mu):
     """State after coasting `dt` seconds (may be negative) on a Kepler orbit."""
     r0, v0 = np.asarray(r0, float), np.asarray(v0, float)
@@ -43,18 +80,30 @@ def propagate(r0, v0, dt, mu):
         period = 2 * math.pi / math.sqrt(mu * alpha ** 3)
         dt = math.fmod(dt, period)
 
-    chi = sqmu * abs(alpha) * dt if abs(alpha) > 1e-12 else sqmu * dt / rn
-    for _ in range(100):
+    def kepler_eq(chi):
+        """Universal Kepler equation F(chi) (zero at the answer) and dF/dchi (= r > 0)."""
         z = alpha * chi ** 2
         c, s = stumpff_c(z), stumpff_s(z)
         f = (rn * vr / sqmu * chi ** 2 * c + (1 - alpha * rn) * chi ** 3 * s
              + rn * chi - sqmu * dt)
         df = (rn * vr / sqmu * chi * (1 - alpha * chi ** 2 * s)
               + (1 - alpha * rn) * chi ** 2 * c + rn)
+        return f, df
+
+    chi = _initial_chi(rn, vr, alpha, mu, dt)
+    converged = False
+    for _ in range(50):
+        try:
+            f, df = kepler_eq(chi)
+        except OverflowError:
+            break
         step = f / df
         chi -= step
-        if abs(step) < 1e-9 * max(1.0, abs(chi)):
+        if abs(step) < 1e-10 * max(1.0, abs(chi)):
+            converged = True
             break
+    if not converged:
+        chi = _bisect_chi(kepler_eq, dt)
 
     z = alpha * chi ** 2
     c, s = stumpff_c(z), stumpff_s(z)
@@ -143,6 +192,14 @@ def time_between(el, nu_to, mu):
     n = math.sqrt(mu / (-el.a) ** 3)
     dt = (mean_anomaly(nu_to, el.e) - mean_anomaly(el.nu, el.e)) / n
     return dt if dt > 0 else None
+
+
+def time_to_periapsis(r, v, mu):
+    """Seconds until the next closest approach (None if already past it on a hyperbola)."""
+    el = elements(r, v, mu)
+    if el.e < 1e-10:
+        return None                              # circular: every point is the periapsis
+    return time_between(el, 0.0, mu)
 
 
 def time_to_radius(r, v, mu, radius, outward):

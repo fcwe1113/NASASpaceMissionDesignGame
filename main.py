@@ -1,6 +1,7 @@
 """
 Tkinter front end: a start page, then a main page with the 3D solar system view
-in the middle, info tables on either side and control buttons underneath.
+in the middle, info tables and the missions list on either side and control
+buttons underneath. Missions are planned in planner.py's window.
 
 Setup:
     pip install ursina spiceypy numpy
@@ -11,7 +12,10 @@ Mouse controls inside the 3D view:
     Middle-drag     pan (free camera only)
 """
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
+
+from game.mission import ACTIVE, COMPLETE, LOST, PENDING, MissionControl
+from physics import ephemeris
 
 FRAME_MS = 1          # delay between rendered frames (vsync sets the real rate)
 TABLE_MS = 250        # how often the side tables refresh
@@ -45,10 +49,82 @@ class InfoTable(ttk.LabelFrame):
             self.tree.insert("", "end", values=row)
 
 
+def short_date(et):
+    return ephemeris.et2str(et)[:11]
+
+
+class MissionsPanel(ttk.LabelFrame):
+    """Pending launches, ongoing missions and previous missions."""
+
+    TABS = [
+        (PENDING, "Pending", [("Name", 110), ("Target", 70), ("Launch", 90)]),
+        (ACTIVE, "Ongoing", [("Name", 110), ("Orbiting", 70), ("Plan ends with", 150)]),
+        ("done", "Previous", [("Name", 110), ("Ended", 90), ("Result", 150)]),
+    ]
+
+    def __init__(self, parent, page):
+        super().__init__(parent, text="Missions", padding=6)
+        self.page = page
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True)
+        self.trees = {}
+        for key, title, cols in self.TABS:
+            tree = ttk.Treeview(self.notebook, columns=[c for c, _ in cols], show="headings",
+                                height=8, selectmode="browse")
+            for col, width in cols:
+                tree.heading(col, text=col)
+                tree.column(col, width=width, anchor="w")
+            tree.bind("<Double-1>", lambda e: self._open())
+            self.notebook.add(tree, text=title)
+            self.trees[key] = tree
+        row = ttk.Frame(self)
+        row.pack(fill="x", pady=(6, 0))
+        ttk.Button(row, text="New mission…", command=lambda: page.open_planner()).pack(side="left")
+        ttk.Button(row, text="Open…", command=self._open).pack(side="left", padx=4)
+        ttk.Button(row, text="Follow craft", command=self._follow).pack(side="left")
+
+    def _selected(self):
+        tree = self.trees[self.TABS[self.notebook.index("current")][0]]
+        sel = tree.selection()
+        return self.page.control_by_name(sel[0]) if sel else None
+
+    def _open(self):
+        m = self._selected()
+        if m is None:
+            messagebox.showinfo("Missions", "Select a mission first", parent=self)
+        elif m.status in (PENDING, ACTIVE):
+            self.page.open_planner(m)
+        else:
+            messagebox.showinfo(m.name, f"{m.end_note}\nEnded {short_date(m.ended_et)}", parent=self)
+
+    def _follow(self):
+        m = self._selected()
+        if m is None or not self.page.view.focus_craft(m.name):
+            messagebox.showinfo("Follow craft", "Select a mission whose craft is flying", parent=self)
+
+    def refresh(self, control, now):
+        rows = {
+            PENDING: [(m.name, m.target, short_date(m.launch_et)) for m in control.by_status(PENDING)],
+            ACTIVE: [(m.name, m.state_at(now).body, m.outcome.describe()) for m in control.by_status(ACTIVE)],
+            "done": [(m.name, short_date(m.ended_et), m.end_note) for m in control.by_status(COMPLETE, LOST)],
+        }
+        for key, tree in self.trees.items():
+            selected = tree.selection()
+            tree.delete(*tree.get_children())
+            for r in rows[key]:
+                tree.insert("", "end", iid=r[0], values=r)
+            keep = [s for s in selected if tree.exists(s)]
+            if keep:
+                tree.selection_set(keep)
+
+
 class MainPage(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent, padding=6)
         self.view = None
+        self.control = MissionControl()
+        self.planner = None
+        self._drawn = {}           # mission name -> (trajectory, status) currently drawn
 
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
@@ -58,12 +134,17 @@ class MainPage(ttk.Frame):
         self.helio.grid(row=0, column=0, sticky="ns", padx=(0, 6))
 
         # Panda3D renders straight into this frame's native window
-        self.view_frame = tk.Frame(self, bg="black", width=800, height=600)
+        # Small requested size: the grid gives it all the space the side panels don't need
+        self.view_frame = tk.Frame(self, bg="black", width=500, height=400)
         self.view_frame.grid(row=0, column=1, sticky="nsew")
 
-        self.geo = InfoTable(self, "From Earth",
+        side = ttk.Frame(self)
+        side.grid(row=0, column=2, sticky="ns", padx=(6, 0))
+        self.geo = InfoTable(side, "From Earth",
                              [("Body", 70), ("Distance (km)", 110), ("Light time (min)", 100)])
-        self.geo.grid(row=0, column=2, sticky="ns", padx=(6, 0))
+        self.geo.pack(fill="x")
+        self.missions = MissionsPanel(side, self)
+        self.missions.pack(fill="both", expand=True, pady=(6, 0))
 
         self._build_controls().grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
 
@@ -90,12 +171,19 @@ class MainPage(ttk.Frame):
                   command=lambda: self._change_speed("faster")).pack(side="left", padx=2)
         self.time_label = ttk.Label(tm, width=28, anchor="e")
         self.time_label.pack(side="left", padx=(8, 2))
+
+        # Latest mission news (launches, landings...)
+        self.news = ttk.Label(bar, foreground="#2a7")
+        self.news.pack(side="left", padx=12)
         return bar
 
     def start_view(self):
         """Create the 3D view once this page is on screen (its window must exist)."""
         self.update()
         from solar_view import SolarSystemView   # heavy import; only needed from here on
+        from ursina import color
+        self.PREVIEW_COLOR = color.cyan
+        self.PATH_COLORS = {PENDING: color.violet, ACTIVE: color.lime}
         self.view = SolarSystemView(self.view_frame.winfo_id(),
                                     self.view_frame.winfo_width(), self.view_frame.winfo_height())
         self.view_frame.bind("<Configure>", lambda e: self.view.resize(e.width, e.height))
@@ -122,7 +210,52 @@ class MainPage(ttk.Frame):
         self.helio.set_rows([(n, f"{d:.4f}", f"{s:.2f}") for n, d, s in v.heliocentric_rows()])
         self.geo.set_rows([(n, f"{d:,.0f}", f"{t:.2f}") for n, d, t in v.geocentric_rows()])
         self.time_label.config(text=f"{v.date_str()}   {v.days_per_second:+.1f} days/s")
+        self.pause_btn.config(text="Resume" if v.paused else "Pause")   # the planner pauses too
+
+        for m in self.control.update(v.sim_et):
+            self.news.config(text=f"{m.name}: launched" if m.status == ACTIVE else f"{m.name}: {m.end_note}")
+        self._sync_paths()
+        self.missions.refresh(self.control, v.sim_et)
         self.after(TABLE_MS, self._refresh_tables)
+
+    # ---------- Missions ----------
+    def control_by_name(self, name):
+        return next((m for m in self.control.missions if m.name == name), None)
+
+    def open_planner(self, mission=None):
+        from planner import MissionPlanner
+        if self.planner is not None:
+            self.planner.lift()
+            return
+        self.planner = MissionPlanner(self, mission)
+
+    def planner_closed(self, planner):
+        self.planner = None
+
+    def mission_changed(self, mission, old_name=None, removed=False):
+        """Called by the planner after it schedules, edits, cancels or ends a mission."""
+        for name in {old_name, mission.name} - {None}:
+            self.view.remove_path(name)
+            self._drawn.pop(name, None)
+        if not removed:
+            self.news.config(text=f"{mission.name}: plan saved")
+        self._sync_paths()
+        self.missions.refresh(self.control, self.view.sim_et)
+
+    def _sync_paths(self):
+        """Draw pending/active missions' paths, redrawing any whose plan or status changed."""
+        live = {m.name: m for m in self.control.by_status(PENDING, ACTIVE)}
+        for name in list(self._drawn):
+            if name not in live:
+                self.view.remove_path(name)
+                del self._drawn[name]
+        for name, m in live.items():
+            traj = m.trajectory
+            drawn = self._drawn.get(name)
+            if drawn is None or drawn[0] is not traj or drawn[1] != m.status:
+                self.view.show_path(name, name, traj, self.PATH_COLORS[m.status],
+                                    craft_window=(m.launch_et, m.end_et))
+                self._drawn[name] = (traj, m.status)
 
     def destroy(self):
         if self.view:

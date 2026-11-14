@@ -44,6 +44,26 @@ def test_propagation_conserves_energy_and_momentum_and_reverses(v0):
     assert np.allclose(vb, v0, atol=1e-8)
 
 
+@pytest.mark.parametrize("mu, r0, v0, days", [
+    (42_828.375816, [-500_000, 200_000, 10_000], [2.5, -1.2, 0.1], 2.2),    # Mars flyby, whole SOI crossing
+    (MU_EARTH, [7000, 0, 0], [0, 11.5, 0.3], 30),                              # Earth escape, far out
+    (MU_EARTH, [900_000, 0, 0], [-3.0, 0.2, 0], 3),                            # inbound from the SOI edge
+])
+def test_long_hyperbolic_arcs(mu, r0, v0, days):
+    """Long hyperbolic propagations used to start Newton far off and stop unconverged."""
+    r0, v0 = np.asarray(r0, float), np.asarray(v0, float)
+    dt = days * 86_400
+    r, v = kepler.propagate(r0, v0, dt, mu)
+    energy = lambda r, v: v @ v / 2 - mu / np.linalg.norm(r)
+    assert energy(r, v) == pytest.approx(energy(r0, v0), rel=1e-9)
+    assert np.allclose(np.cross(r, v), np.cross(r0, v0), rtol=1e-8)
+    # Stepping there in small hops agrees with one big jump
+    rs, vs = r0, v0
+    for _ in range(20):
+        rs, vs = kepler.propagate(rs, vs, dt / 20, mu)
+    assert np.allclose(r, rs, rtol=1e-8, atol=1e-3)
+
+
 def test_many_periods_stays_accurate():
     r0 = np.array([7000.0, 0, 0])
     v0 = np.array([0, 8.5, 0.3])

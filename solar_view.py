@@ -9,6 +9,8 @@ Mouse controls inside the view:
     Right-drag      orbit camera      Scroll       zoom
     Middle-drag     pan (free camera only)
 """
+from itertools import groupby
+
 from panda3d.core import WindowProperties, loadPrcFileData
 from ursina import *
 import spiceypy as spice
@@ -17,6 +19,7 @@ import numpy as np
 # ---------- Ephemeris ----------
 # physics.ephemeris loads the kernels and knows the time span they cover
 from physics.ephemeris import COVER_MIN, COVER_MAX
+from physics.bodies import BODIES, body_state
 
 AU_KM = 149_597_870.7
 C_KM_S = 299_792.458
@@ -39,6 +42,7 @@ MOON_RADIUS_KM = 1_737.4
 
 # SPICE ids of every body shown, in display order (used by the info tables)
 BODY_IDS = {"Sun": "10", **{n: v[0] for n, v in PLANETS.items()}, "Moon": "301"}
+BODY_COLORS = {"Sun": color.yellow, **{n: v[2] for n, v in PLANETS.items()}, "Moon": color.white}
 
 
 def spice_pos(target, et, center="10"):
@@ -117,7 +121,7 @@ class Marker:
 
     def update(self):
         rel = camera.getRelativePoint(self.body, Vec3(0, 0, 0))   # z = depth in front of camera (y-up)
-        visible = rel[2] > 0
+        visible = rel[2] > 0 and self.body.enabled
         self.ring.enabled = self.label.enabled = visible
         if not visible:
             return
@@ -131,6 +135,119 @@ class Marker:
 
     def hide(self):
         self.ring.enabled = self.label.enabled = False
+
+    def destroy(self):
+        destroy(self.ring)
+        destroy(self.label)
+
+
+# ---------- Mission paths ----------
+def km_to_game(r):
+    """Ecliptic km vector (x, y, z-up) -> Ursina (x, y-up, z) game units."""
+    return Vec3(r[0] / KM_PER_UNIT, r[2] / KM_PER_UNIT, r[1] / KM_PER_UNIT)
+
+
+class Visit:
+    """A run of consecutive trajectory segments around one body, drawn on one anchor.
+
+    The anchor sits where the body is *while the craft is there*: before the
+    visit, where the body will be on arrival (with a dim "ghost" of the body to
+    show it); during it, on the moving body; afterwards, where the body was when
+    the craft left. So the arc into a planet's SOI meets the pass around it, and
+    snaps onto the real planet as the clock catches up.
+    """
+
+    def __init__(self, view, body, segments, show_ghost):
+        self.view, self.body = view, body
+        self.t0, self.t1 = segments[0].start.et, segments[-1].end_et
+        self.parent = BODIES[body].parent
+        if self.parent:
+            self.off0 = km_to_game(body_state(body, self.t0)[0])
+            self.off1 = km_to_game(body_state(body, self.t1)[0])
+        self.anchor = Entity()
+        self.ghost = self.ghost_marker = None
+        if show_ghost:
+            col = BODY_COLORS[body]
+            self.ghost = Entity(model="sphere", color=col.tint(-0.55), scale=diameter(BODIES[body].radius))
+            self.ghost_marker = Marker(self.ghost, f"{body} on arrival", col.tint(-0.2), BODIES[body].radius)
+        self.update(view.sim_et)
+
+    def update(self, et):
+        if self.parent is None:
+            pos = Vec3(0, 0, 0)
+        elif et < self.t0:
+            pos = self.view.pivots[self.parent].world_position + self.off0
+        elif et > self.t1:
+            pos = self.view.pivots[self.parent].world_position + self.off1
+        else:
+            pos = self.view.pivots[self.body].world_position
+        self.anchor.position = pos
+        if self.ghost:
+            self.ghost.enabled = et < self.t0
+            self.ghost.position = pos
+
+    def destroy(self):
+        destroy(self.anchor)
+        if self.ghost:
+            destroy(self.ghost)
+            self.ghost_marker.destroy()
+
+
+class FlightPath:
+    """A mission's path and (optionally) its craft.
+
+    Each trajectory segment is drawn relative to the body it orbits (see Visit
+    for where that body's frame is placed), so e.g. a parking orbit moves along
+    with Earth while the craft is in it.
+    """
+    MAX_POINTS = 300
+
+    def __init__(self, view, label, trajectory, col, craft_window=None, thickness=1.5):
+        self.view, self.trajectory = view, trajectory
+        self.craft_window = craft_window          # (from_et, to_et) when the craft is shown
+        self.visits, self.lines = [], []
+        for k, (body, segs) in enumerate(groupby(trajectory.segments, key=lambda s: s.body)):
+            segs = list(segs)
+            visit = Visit(view, body, segs, show_ghost=k > 0 and body != "Sun")
+            self.visits.append(visit)
+            self.lines += [Entity(parent=visit.anchor, color=col,
+                                  model=Mesh(vertices=self._points(seg), mode="line", thickness=thickness))
+                           for seg in segs]
+        self.craft = Entity(model="sphere", color=col, scale=0.05, enabled=False)
+        self.marker = Marker(self.craft, label, col, 0.0)
+
+    @property
+    def markers(self):
+        return [self.marker] + [v.ghost_marker for v in self.visits if v.ghost_marker]
+
+    def _points(self, seg):
+        t0, t1 = seg.start.et, seg.end_et
+        el = seg.start.elements
+        if hasattr(seg, "ets"):                     # long burn: use its own samples
+            step = max(1, len(seg.ets) // self.MAX_POINTS)
+            pts = list(seg.rs[::step]) + [seg.rs[-1]]
+        else:
+            if el.e < 1:                            # closed orbit: one lap is enough
+                t1 = min(t1, t0 + el.period(seg.start.mu))
+            pts = [seg.state_at(t).r for t in np.linspace(t0, t1, self.MAX_POINTS)]
+        return [km_to_game(p) for p in pts]
+
+    def update(self, et):
+        for visit in self.visits:
+            visit.update(et)
+        show = self.craft_window is not None and self.craft_window[0] <= et <= self.craft_window[1]
+        self.craft.enabled = show
+        if show:
+            s = self.trajectory.state_at(et)
+            self.craft.position = self.view.pivots[s.body].world_position + km_to_game(s.r)
+
+    def destroy(self):
+        for line in self.lines:
+            destroy(line)
+        for visit in self.visits:
+            visit.destroy()
+        destroy(self.craft)
+        self.marker.destroy()
 
 
 class SolarSystemView:
@@ -173,6 +290,10 @@ class SolarSystemView:
         self.trails.append(Trail("301", "399", 27.3, self.sim_et, color.gray, thickness=1,
                                  exag=MOON_EXAG, parent=self.moon_pivot, n_points=200))
         self.moon = Entity(model="sphere", color=color.white, scale=diameter(MOON_RADIUS_KM))
+
+        # One pivot per body, following it, for drawing things in that body's frame
+        self.pivots = {name: Entity() for name in BODY_IDS}
+        self.paths = {}            # key -> FlightPath
 
         # Anchored to the view's left edge; Ursina keeps UI x in proportion on resize
         self.date_text = Text(position=window.top_left + Vec2(0.02, -0.03), scale=1.2)
@@ -221,9 +342,32 @@ class SolarSystemView:
     def destroy(self):
         self.app.destroy()
 
+    def show_path(self, key, label, trajectory, col, craft_window=None, thickness=1.5):
+        """Draw (or redraw) a flight path. craft_window = (from_et, to_et) to show the craft."""
+        self.remove_path(key)
+        self.paths[key] = FlightPath(self, label, trajectory, col, craft_window, thickness)
+
+    def remove_path(self, key):
+        path = self.paths.pop(key, None)
+        if path is not None:
+            if self.focus_target is path.craft:
+                self.set_focus("Sun")
+            path.destroy()
+
+    def focus_craft(self, key):
+        """Follow a mission's craft, if it is currently flying."""
+        path = self.paths.get(key)
+        if path is not None and path.craft.enabled:
+            self._focus_on(path.craft)
+            return True
+        return False
+
     def set_focus(self, name):
         """Lock the view on a body by name, or pass None for a free camera."""
-        self.focus_target = None if name is None else self.focus_targets[name]
+        self._focus_on(None if name is None else self.focus_targets[name])
+
+    def _focus_on(self, entity):
+        self.focus_target = entity
         if self.focus_target is None:
             self.cam.pan_speed = self.PAN_SPEED   # free camera: middle-drag pans
         else:
@@ -278,6 +422,11 @@ class SolarSystemView:
         for trail in self.trails:
             trail.update(self.sim_et)
 
+        for name, body in {**self.bodies, "Moon": self.moon}.items():
+            self.pivots[name].position = body.position
+        for path in self.paths.values():
+            path.update(self.sim_et)
+
         # Keep the view centre exactly on the selected body.
         # During a switch, ease from the old centre to the (moving) new target,
         # then lock on with no lag.
@@ -296,6 +445,9 @@ class SolarSystemView:
     def _update_markers(self):
         for m in self.markers.values():
             m.update()
+        for path in self.paths.values():
+            for m in path.markers:
+                m.update()
         # From far away the Moon's marker sits on top of Earth's; hide it until they separate
         e, mo = self.markers["Earth"], self.markers["Moon"]
         if mo.ring.enabled and e.ring.enabled and \

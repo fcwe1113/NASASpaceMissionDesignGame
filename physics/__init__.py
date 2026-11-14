@@ -5,6 +5,7 @@
     kepler      two-body propagation, orbital elements, event times
     lambert     Lambert solver and porkchop (launch window) searches
     trajectory  coasting through SOIs, burns, fuel, the orbit test
+    planning    burns a planner works out: departures, aiming at a body, capture
 
 Units everywhere: km, km/s, kg, seconds of ephemeris time (ET).
 """
