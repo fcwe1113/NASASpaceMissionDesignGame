@@ -1,6 +1,10 @@
-"""Missions: a craft, a start in a parking orbit, and a plan of burns.
+"""Missions and flights.
 
-Life cycle:  pending -> active (at launch) -> complete | lost
+A Mission is one launch: one or more craft leaving Earth on the same date. Each
+craft has its own Flight: a start in a parking orbit and a plan of burns, with
+its own destination.
+
+Flight life cycle:  pending -> active (at launch) -> complete | lost
   - pending: everything can change.
   - active:  the craft and launch are fixed; burns already carried out are
              locked; future burns can be added, edited or removed.
@@ -48,7 +52,8 @@ class Outcome:
 
 
 @dataclass
-class Mission:
+class Flight:
+    """One craft's flight: its physics craft, parking-orbit start and burn plan."""
     name: str
     target: str
     craft: Craft
@@ -66,6 +71,7 @@ class Mission:
         self._traj = None
         self.now = -math.inf           # sim time of the last update()
         self.assist = None             # the last gravity assist planned (assist.AssistPlan)
+        self.design = None             # the CraftDesign the craft was built from, if any
 
     # ---------- Construction ----------
     @classmethod
@@ -121,6 +127,27 @@ class Mission:
         if setup.dv_flyby > 0.05:
             note += f" (includes making up {setup.dv_flyby * 1000:.0f} m/s the flyby can't give)"
         return note
+
+    def add_landing(self, burn_et, body, arrive_et=None):
+        """Plan a touchdown on `body` with a burn at `burn_et`. Later burns are replaced.
+
+        Orbiting `body` then: a de-orbit burn. Orbiting its parent: an arrival aimed
+        at the surface around `arrive_et`. Returns a note; raises PlanningError if
+        it can't be done (wrong place, not enough fuel) and leaves the plan as it was.
+        """
+        earlier = [b for b in self.burns if b.et < burn_et]
+        before = fly(self.start, self.craft, earlier, burn_et)
+        if before.end_reason == "impact":
+            raise planning.PlanningError("The craft has already landed by then")
+        burn = planning.landing_burn(before.end, before.craft, body, arrive_et)
+        old = (self.burns, self.horizon_et)
+        self.set_plan(earlier + [burn], horizon_et=max(arrive_et or burn_et, burn_et) + 30 * DAY)
+        out = self.outcome
+        if out.kind not in ("impact", "returned") or out.body != body:     # an Earth touchdown is a return
+            self.set_plan(*old)
+            raise planning.PlanningError(f"That burn doesn't bring the craft down on {body} "
+                                         f"({out.describe().lower()})")
+        return f"Lands on {body} {(out.et - self.launch_et) / DAY:.1f} days after launch"
 
     @classmethod
     def to_moon(cls, name, craft, depart_et, tof, periapsis_alt=100.0):
@@ -223,6 +250,11 @@ class Mission:
         self.craft = craft
         self._changed()
 
+    def set_design(self, design):
+        """Build the craft from a CraftDesign (and remember the design)."""
+        self.set_craft(design.physics_craft())
+        self.design = design
+
     def set_start(self, start, burns=None, horizon_et=None):
         """New launch (and its plan). Only before launch."""
         if self.status != PENDING:
@@ -280,6 +312,74 @@ class Mission:
         """Seconds the burn lasts with the fuel the craft has left by then."""
         before = fly(self.start, self.craft, [b for b in self.burns if b.et < burn.et], burn.et)
         return before.craft.burn_time(burn.dv) if before.craft.fuel > 0 else 0.0
+
+
+class Mission:
+    """One launch: several craft (flights) leaving Earth on the same date.
+
+    Status: pending before launch; active while any craft is still flying;
+    complete once every craft has ended (and at least one ended well); lost if
+    every craft was lost.
+    """
+
+    def __init__(self, name, flights):
+        if not flights:
+            raise PlanError("A mission needs at least one craft")
+        names = [f.name for f in flights]
+        if len(set(names)) != len(names):
+            raise PlanError("Each craft in a mission needs its own name")
+        if len({f.launch_et for f in flights}) > 1:
+            raise PlanError("All craft in a mission launch together, on the same date")
+        self.name = name
+        self.flights = list(flights)
+
+    @property
+    def launch_et(self):
+        return self.flights[0].launch_et
+
+    @property
+    def target(self):
+        """Where the first craft is going (for lists)."""
+        return self.flights[0].target
+
+    @property
+    def status(self):
+        states = {f.status for f in self.flights}
+        if states == {PENDING}:
+            return PENDING
+        if states & {PENDING, ACTIVE}:
+            return ACTIVE
+        return LOST if states == {LOST} else COMPLETE
+
+    @property
+    def ended_et(self):
+        ends = [f.ended_et for f in self.flights if f.ended_et is not None]
+        return max(ends) if ends else None
+
+    @property
+    def end_note(self):
+        return "; ".join(f"{f.name}: {f.end_note}" for f in self.flights) if len(self.flights) > 1 \
+            else self.flights[0].end_note
+
+    def flight(self, name):
+        return next(f for f in self.flights if f.name == name)
+
+    def cost(self):
+        return sum(f.design.cost() for f in self.flights if f.design is not None)
+
+    def update(self, now):
+        """Advance every flight. Returns True if the mission's status changed."""
+        old = self.status
+        for f in self.flights:
+            f.update(now)
+        return self.status != old
+
+    def set_flights(self, flights):
+        """Replace all craft (only before launch)."""
+        if self.status != PENDING:
+            raise PlanError("Craft can't be added or removed after launch")
+        Mission(self.name, flights)            # validates
+        self.flights = list(flights)
 
 
 class MissionControl:

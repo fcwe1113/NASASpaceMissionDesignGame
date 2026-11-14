@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from game.mission import (ACTIVE, COMPLETE, PENDING, Mission, MissionControl, PlanError)
+from game.mission import (ACTIVE, COMPLETE, PENDING, Flight, Mission, MissionControl, PlanError)
 from physics import Burn, Craft, ephemeris
 from physics import planning
 
@@ -13,7 +13,7 @@ CRAFT = Craft(dry_mass=2000, fuel=12_000, isp=320, thrust=50_000)
 
 @pytest.fixture
 def moon_mission():
-    return Mission.to_moon("Luna 1", CRAFT, ET, 4 * DAY, periapsis_alt=100)
+    return Flight.to_moon("Luna 1", CRAFT, ET, 4 * DAY, periapsis_alt=100)
 
 
 def test_moon_mission_reaches_the_moon(moon_mission):
@@ -33,7 +33,7 @@ def test_passing_the_target_without_braking_is_a_flyby(moon_mission):
 
 
 def test_earth_orbit_mission_is_never_a_flyby():
-    m = Mission.earth_orbit("Escape", CRAFT, ET)
+    m = Flight.earth_orbit("Escape", CRAFT, ET)
     m.set_plan([Burn(ET + 600, prograde=3.5)], horizon_et=ET + 30 * DAY)
     assert m.outcome.kind == "in_flight" and m.outcome.body == "Sun"
 
@@ -74,7 +74,7 @@ def test_pending_missions_can_change_everything(moon_mission):
 
 
 def test_impact_completes_automatically():
-    m = Mission.earth_orbit("Deorbit", CRAFT, ET)
+    m = Flight.earth_orbit("Deorbit", CRAFT, ET)
     m.set_plan([Burn(ET + 600, prograde=-0.5)])
     out = m.outcome
     assert out.kind == "returned"                                   # came down on Earth
@@ -85,7 +85,7 @@ def test_impact_completes_automatically():
 
 
 def test_declaring_an_orbit_complete_needs_a_full_lap():
-    m = Mission.earth_orbit("Sat", CRAFT, ET)
+    m = Flight.earth_orbit("Sat", CRAFT, ET)
     m.update(ET + 60)
     assert not m.can_declare_complete(ET + 60)
     assert m.can_declare_complete(ET + 2 * 3600)
@@ -96,14 +96,14 @@ def test_declaring_an_orbit_complete_needs_a_full_lap():
 
 
 def test_cant_declare_with_burns_still_to_come():
-    m = Mission.earth_orbit("Sat", CRAFT, ET)
+    m = Flight.earth_orbit("Sat", CRAFT, ET)
     m.set_plan([Burn(ET + 5 * DAY, prograde=0.1)], horizon_et=ET + 10 * DAY)
     m.update(ET + DAY)
     assert not m.can_declare_complete(ET + DAY)
 
 
 def test_active_mission_projection_keeps_up_with_the_clock():
-    m = Mission.earth_orbit("Sat", CRAFT, ET)
+    m = Flight.earth_orbit("Sat", CRAFT, ET)
     m.update(ET + 100 * DAY)
     assert m.horizon_et > ET + 100 * DAY
     assert m.state_at(ET + 100 * DAY).body == "Earth"
@@ -111,10 +111,10 @@ def test_active_mission_projection_keeps_up_with_the_clock():
 
 def test_mission_control():
     mc = MissionControl()
-    a = Mission.earth_orbit("Sat", CRAFT, ET)
+    a = Mission("Sat", [Flight.earth_orbit("Sat", CRAFT, ET)])
     mc.add(a)
     with pytest.raises(PlanError):
-        mc.add(Mission.earth_orbit("Sat", CRAFT, ET))
+        mc.add(Mission("Sat", [Flight.earth_orbit("Sat", CRAFT, ET)]))
     assert mc.unique_name("Sat") == "Sat 2"
     assert mc.update(ET + 60) == [a]
     assert mc.by_status(ACTIVE) == [a]
@@ -122,9 +122,56 @@ def test_mission_control():
         mc.remove(a)                                                # already launched
 
 
+# ---------- Several craft in one launch ----------
+def two_craft():
+    capsule = Flight.to_moon("Capsule", CRAFT, ET, 4 * DAY, periapsis_alt=100)
+    cargo = Flight.earth_orbit("Cargo", CRAFT, ET)
+    return Mission("Joint", [capsule, cargo])
+
+
+def test_craft_in_a_mission_launch_together_with_their_own_plans():
+    m = two_craft()
+    assert m.launch_et == ET and m.target == "Moon"
+    assert m.flight("Cargo").outcome.kind == "orbit" and m.flight("Capsule").outcome.body == "Moon"
+    with pytest.raises(PlanError, match="same date"):
+        Mission("Bad", [Flight.earth_orbit("A", CRAFT, ET), Flight.earth_orbit("B", CRAFT, ET + DAY)])
+    with pytest.raises(PlanError, match="own name"):
+        Mission("Bad", [Flight.earth_orbit("A", CRAFT, ET), Flight.earth_orbit("A", CRAFT, ET)])
+
+
+def test_mission_status_follows_its_craft():
+    m = two_craft()
+    assert m.status == PENDING
+    assert m.update(ET + 60) and m.status == ACTIVE
+    m.flight("Cargo").declare_complete(ET + 2 * 3600)
+    assert m.status == ACTIVE                       # the capsule is still flying
+    cap = m.flight("Capsule")
+    cap.set_plan(cap.burns + [planning.capture_burn(cap.trajectory, "Moon")], horizon_et=ET + 8 * DAY)
+    m.update(ET + 6 * DAY)
+    cap.declare_complete(ET + 6 * DAY)
+    assert m.status == COMPLETE
+    assert "Capsule" in m.end_note and "Cargo" in m.end_note
+
+
+def test_craft_are_fixed_after_launch():
+    m = two_craft()
+    m.update(ET + 60)
+    with pytest.raises(PlanError):
+        m.set_flights(m.flights[:1])
+
+
+def test_design_builds_the_craft():
+    from game.design import starter_design
+    f = Flight.earth_orbit("Sat", CRAFT, ET)
+    d = starter_design()
+    f.set_design(d)
+    assert f.design is d and f.craft.dry_mass == d.dry_mass() and f.craft.fuel == d.fuel_kg
+    assert Mission("Sat", [f]).cost() == pytest.approx(d.cost())
+
+
 def test_burn_time_uses_the_fuel_left():
     ion = Craft(dry_mass=1000, fuel=100, isp=3000, thrust=0.5)
-    m = Mission.earth_orbit("Ion", ion, ET)
+    m = Flight.earth_orbit("Ion", ion, ET)
     b = Burn(ET + 600, prograde=0.5)
     m.set_plan([b])
     assert m.burn_time(b) == pytest.approx(ion.burn_time(0.5))

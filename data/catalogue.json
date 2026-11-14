@@ -1,0 +1,81 @@
+{
+  "_notes": [
+    "Equipment catalogue. Masses in kg, power in kW (negative = uses power; solar output is at Earth's distance from the Sun and falls with distance squared), costs in millions of dollars.",
+    "tier 0 = available from the start; higher tiers are for the tech tree (everything is shown for now).",
+    "relaunch: a stage that can take off again from a surface it landed on."
+  ],
+  "consumption": {
+    "food_kg_per_crew_day": 1.8,
+    "water_kg_per_crew_day": 3.0
+  },
+  "fuel_cost_musd_per_tonne": 0.005,
+  "surface_ascent_dv_km_s": {"Moon": 1.9, "Mercury": 3.0, "Mars": 4.1, "Venus": 10.0},
+
+  "launchers": [
+    {"id": "light",      "name": "Light launcher",       "payload_kg": 8000,   "cost_musd": 30,  "tier": 0,
+     "description": "Small rocket for light payloads."},
+    {"id": "medium",     "name": "Medium launcher",      "payload_kg": 20000,  "cost_musd": 65,  "tier": 0,
+     "description": "The workhorse: crewed Moon trips fit on one."},
+    {"id": "heavy",      "name": "Heavy launcher",       "payload_kg": 60000,  "cost_musd": 150, "tier": 1,
+     "description": "Lifts habitats and Mars-bound craft."},
+    {"id": "superheavy", "name": "Super-heavy launcher", "payload_kg": 120000, "cost_musd": 300, "tier": 2,
+     "description": "For the biggest single items, like terraforming equipment."}
+  ],
+
+  "stages": [
+    {"id": "storable",  "name": "Storable chemical stage", "isp_s": 320,  "thrust_n": 50000,  "dry_kg": 1000,
+     "fuel_capacity_kg": 12000, "cost_musd": 15, "relaunch": false, "tier": 0,
+     "description": "Simple and reliable. Modest fuel efficiency."},
+    {"id": "lander",    "name": "Reusable lander stage",   "isp_s": 315,  "thrust_n": 45000,  "dry_kg": 2000,
+     "fuel_capacity_kg": 14000, "cost_musd": 45, "relaunch": true, "tier": 1,
+     "description": "Can take off again from where it lands, so crews can come home."},
+    {"id": "methalox",  "name": "Methalox stage",          "isp_s": 370,  "thrust_n": 200000, "dry_kg": 2500,
+     "fuel_capacity_kg": 30000, "cost_musd": 35, "relaunch": true, "tier": 1,
+     "description": "Efficient, powerful and able to relaunch."},
+    {"id": "hydrolox",  "name": "Hydrolox stage",          "isp_s": 450,  "thrust_n": 110000, "dry_kg": 3500,
+     "fuel_capacity_kg": 25000, "cost_musd": 50, "relaunch": false, "tier": 2,
+     "description": "Best chemical efficiency; bulky tanks."},
+    {"id": "nuclear",   "name": "Nuclear thermal stage",   "isp_s": 900,  "thrust_n": 70000,  "dry_kg": 8000,
+     "fuel_capacity_kg": 20000, "cost_musd": 150, "relaunch": false, "tier": 3,
+     "description": "Twice as efficient as chemical, but heavy."},
+    {"id": "ion",       "name": "Ion stage",               "isp_s": 3000, "thrust_n": 1.0,    "dry_kg": 1200,
+     "fuel_capacity_kg": 3000,  "cost_musd": 60, "relaunch": false, "tier": 3,
+     "description": "Superb efficiency, tiny push: burns last weeks."}
+  ],
+
+  "modules": [
+    {"id": "capsule2",  "name": "Crew capsule (2 seats)",  "kind": "capsule",  "mass_kg": 2000,  "power_kw": -1.0,
+     "seats": 2, "cost_musd": 40, "tier": 0,
+     "description": "Carries crew between places. Not a shelter once landed."},
+    {"id": "capsule4",  "name": "Crew capsule (4 seats)",  "kind": "capsule",  "mass_kg": 5000,  "power_kw": -1.5,
+     "seats": 4, "cost_musd": 70, "tier": 1,
+     "description": "Bigger capsule for larger crews."},
+    {"id": "shelter2",  "name": "Surface shelter (2)",     "kind": "habitat",  "mass_kg": 2000,  "power_kw": -1.0,
+     "habitat_places": 2, "cost_musd": 25, "tier": 0,
+     "description": "Small shelter for short surface stays. Crew landing without a habitat place die."},
+    {"id": "habitat4",  "name": "Habitat (4)",             "kind": "habitat",  "mass_kg": 15000, "power_kw": -8.0,
+     "habitat_places": 4, "cost_musd": 120, "tier": 1,
+     "description": "Long-stay home for four."},
+    {"id": "supplies",  "name": "Supply pod",              "kind": "supplies", "mass_kg": 600,   "power_kw": 0.0,
+     "food_kg": 200, "water_kg": 300, "cost_musd": 2, "tier": 0,
+     "description": "200 kg food and 300 kg water (about 2 weeks for 2 crew)."},
+    {"id": "supplies_l","name": "Large supply crate",      "kind": "supplies", "mass_kg": 5500,  "power_kw": 0.0,
+     "food_kg": 2000, "water_kg": 3000, "cost_musd": 15, "tier": 1,
+     "description": "2 t food and 3 t water."},
+    {"id": "solar_s",   "name": "Solar array",             "kind": "solar",    "mass_kg": 200,   "power_kw": 3.0,
+     "cost_musd": 5, "tier": 0,
+     "description": "3 kW at Earth's distance from the Sun; less further out (43% at Mars)."},
+    {"id": "solar_l",   "name": "Large solar array",       "kind": "solar",    "mass_kg": 800,   "power_kw": 15.0,
+     "cost_musd": 18, "tier": 1,
+     "description": "15 kW at Earth's distance from the Sun."},
+    {"id": "recycler",  "name": "Water recycler",          "kind": "life",     "mass_kg": 1500,  "power_kw": -2.0,
+     "water_recycling": 0.8, "cost_musd": 30, "tier": 1,
+     "description": "Recovers 80% of the water crew use."},
+    {"id": "farm",      "name": "Greenhouse farm",         "kind": "farm",     "mass_kg": 4000,  "power_kw": -5.0,
+     "food_kg_per_day": 1.8, "cost_musd": 60, "tier": 2,
+     "description": "Grows enough food for one crew member."},
+    {"id": "science",   "name": "Science kit",             "kind": "science",  "mass_kg": 500,   "power_kw": -0.5,
+     "cost_musd": 10, "tier": 0,
+     "description": "Instruments for experiments (earns science points)."}
+  ]
+}

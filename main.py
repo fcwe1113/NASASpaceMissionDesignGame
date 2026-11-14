@@ -69,8 +69,9 @@ class MissionsPanel(ttk.LabelFrame):
         self.notebook.pack(fill="both", expand=True)
         self.trees = {}
         for key, title, cols in self.TABS:
-            tree = ttk.Treeview(self.notebook, columns=[c for c, _ in cols], show="headings",
+            tree = ttk.Treeview(self.notebook, columns=[c for c, _ in cols], show="tree headings",
                                 height=8, selectmode="browse")
+            tree.column("#0", width=18, stretch=False)          # expand/collapse arrows for craft rows
             for col, width in cols:
                 tree.heading(col, text=col)
                 tree.column(col, width=width, anchor="w")
@@ -84,12 +85,16 @@ class MissionsPanel(ttk.LabelFrame):
         ttk.Button(row, text="Follow craft", command=self._follow).pack(side="left")
 
     def _selected(self):
+        """(mission, craft name or None) for the selected row. Craft rows are 'mission/craft'."""
         tree = self.trees[self.TABS[self.notebook.index("current")][0]]
         sel = tree.selection()
-        return self.page.control_by_name(sel[0]) if sel else None
+        if not sel:
+            return None, None
+        mission_name, _, craft = sel[0].partition("/")
+        return self.page.control_by_name(mission_name), craft or None
 
     def _open(self):
-        m = self._selected()
+        m, _ = self._selected()
         if m is None:
             messagebox.showinfo("Missions", "Select a mission first", parent=self)
         elif m.status in (PENDING, ACTIVE):
@@ -98,21 +103,37 @@ class MissionsPanel(ttk.LabelFrame):
             messagebox.showinfo(m.name, f"{m.end_note}\nEnded {short_date(m.ended_et)}", parent=self)
 
     def _follow(self):
-        m = self._selected()
-        if m is None or not self.page.view.focus_craft(m.name):
-            messagebox.showinfo("Follow craft", "Select a mission whose craft is flying", parent=self)
+        m, craft = self._selected()
+        flights = [] if m is None else [f for f in m.flights if craft is None or f.name == craft]
+        if not any(self.page.view.focus_craft(self.page.path_key(m, f)) for f in flights):
+            messagebox.showinfo("Follow craft", "Select a mission (or craft) that is flying", parent=self)
 
     def refresh(self, control, now):
-        rows = {
-            PENDING: [(m.name, m.target, short_date(m.launch_et)) for m in control.by_status(PENDING)],
-            ACTIVE: [(m.name, m.state_at(now).body, m.outcome.describe()) for m in control.by_status(ACTIVE)],
-            "done": [(m.name, short_date(m.ended_et), m.end_note) for m in control.by_status(COMPLETE, LOST)],
-        }
+        def flight_row(m, f, key):
+            if key == PENDING:
+                return f.name, f.target, ""
+            if key == ACTIVE:
+                if f.status != ACTIVE:
+                    return f.name, "", f.end_note
+                return f.name, f.state_at(now).body, f.outcome.describe()
+            return f.name, short_date(f.ended_et) if f.ended_et else "", f.end_note
+
+        groups = {PENDING: control.by_status(PENDING), ACTIVE: control.by_status(ACTIVE),
+                  "done": control.by_status(COMPLETE, LOST)}
         for key, tree in self.trees.items():
             selected = tree.selection()
+            open_rows = {iid for iid in tree.get_children() if tree.item(iid, "open")}
             tree.delete(*tree.get_children())
-            for r in rows[key]:
-                tree.insert("", "end", iid=r[0], values=r)
+            for m in groups[key]:
+                if key == PENDING:
+                    values = (m.name, m.target, short_date(m.launch_et))
+                elif key == ACTIVE:
+                    values = (m.name, f"{len(m.flights)} craft", "")
+                else:
+                    values = (m.name, short_date(m.ended_et) if m.ended_et else "", "")
+                tree.insert("", "end", iid=m.name, values=values, open=m.name in open_rows or key == ACTIVE)
+                for f in m.flights:
+                    tree.insert(m.name, "end", iid=f"{m.name}/{f.name}", values=flight_row(m, f, key))
             keep = [s for s in selected if tree.exists(s)]
             if keep:
                 tree.selection_set(keep)
@@ -232,30 +253,40 @@ class MainPage(ttk.Frame):
     def planner_closed(self, planner):
         self.planner = None
 
-    def mission_changed(self, mission, old_name=None, removed=False):
+    def mission_changed(self, mission, old_name=None, removed=False, old_flights=None):
         """Called by the planner after it schedules, edits, cancels or ends a mission."""
         for name in {old_name, mission.name} - {None}:
-            self.view.remove_path(name)
-            self._drawn.pop(name, None)
+            for key in [k for k in self._drawn if k.startswith(name + "/")]:
+                self.view.remove_path(key)
+                del self._drawn[key]
         if not removed:
             self.news.config(text=f"{mission.name}: plan saved")
         self._sync_paths()
         self.missions.refresh(self.control, self.view.sim_et)
 
+    @staticmethod
+    def path_key(mission, flight):
+        return f"{mission.name}/{flight.name}"
+
     def _sync_paths(self):
-        """Draw pending/active missions' paths, redrawing any whose plan or status changed."""
-        live = {m.name: m for m in self.control.by_status(PENDING, ACTIVE)}
-        for name in list(self._drawn):
-            if name not in live:
-                self.view.remove_path(name)
-                del self._drawn[name]
-        for name, m in live.items():
-            traj = m.trajectory
-            drawn = self._drawn.get(name)
-            if drawn is None or drawn[0] is not traj or drawn[1] != m.status:
-                self.view.show_path(name, name, traj, self.PATH_COLORS[m.status],
-                                    craft_window=(m.launch_et, m.end_et))
-                self._drawn[name] = (traj, m.status)
+        """Draw each flying or planned craft's path, redrawing any whose plan or status changed."""
+        live = {}
+        for m in self.control.by_status(PENDING, ACTIVE):
+            for f in m.flights:
+                if f.status in (PENDING, ACTIVE):
+                    live[self.path_key(m, f)] = (m, f)
+        for key in list(self._drawn):
+            if key not in live:
+                self.view.remove_path(key)
+                del self._drawn[key]
+        for key, (m, f) in live.items():
+            traj = f.trajectory
+            drawn = self._drawn.get(key)
+            if drawn is None or drawn[0] is not traj or drawn[1] != f.status:
+                label = m.name if len(m.flights) == 1 else f"{m.name}: {f.name}"
+                self.view.show_path(key, label, traj, self.PATH_COLORS[f.status],
+                                    craft_window=(f.launch_et, f.end_et))
+                self._drawn[key] = (traj, f.status)
 
     def destroy(self):
         if self.view:

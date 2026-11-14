@@ -107,7 +107,7 @@ def aim_burn(state, craft, target, et_arrive, periapsis_alt, side=1, iterations=
         burn = correction_burn(state, target, et_arrive, aim_offset=b * perp)
         if burn.dv > craft.dv_remaining:
             raise PlanningError(f"Reaching {target} then needs a {burn.dv:.2f} km/s burn, but the craft "
-                                f"only has {craft.dv_remaining:.2f} km/s left")
+                                f"only has {max(0.0, craft.dv_remaining):.2f} km/s left")
         seg = first_visit(fly(state, craft, [burn], look), target)
         if seg is None:
             raise PlanningError(f"Couldn't reach {target}'s sphere of influence from here by that "
@@ -119,6 +119,84 @@ def aim_burn(state, craft, target, et_arrive, periapsis_alt, side=1, iterations=
         # the square-root step is safe for both
         b *= math.sqrt(rp_goal / max(rp, 1.0))
     return burn, rp - t.radius
+
+
+LANDING_DEPTH = 0.5      # arrivals aim their lowest point this deep (fraction of the radius): a sure touchdown
+DEORBIT_DEPTH = 0.95     # from orbit, just below the surface is enough (and much cheaper)
+
+
+def deorbit_burn(state):
+    """Retrograde burn, right now, that brings the lowest point of the orbit below the surface.
+
+    Slows the craft along its direction of travel just enough that the new
+    periapsis sits at DEORBIT_DEPTH x the radius of the body it is orbiting.
+    """
+    b = BODIES[state.body]
+    if b.parent is None:
+        raise PlanningError("Can't land on the Sun")
+    goal = DEORBIT_DEPTH * b.radius
+    if state.elements.periapsis < b.radius:
+        raise PlanningError(f"The craft already comes down on {state.body} without a burn")
+    # Periapsis grows with speed (for a fixed direction): bisect the speed factor
+    lo, hi = 0.0, 1.0
+    for _ in range(60):
+        k = (lo + hi) / 2
+        if kepler.elements(state.r, state.v * k, b.gm).periapsis > goal:
+            hi = k
+        else:
+            lo = k
+    dv = (1 - lo) * np.linalg.norm(state.v)
+    return Burn(state.et, prograde=-float(dv))
+
+
+def best_departure_point(state, target, et_arrive, samples=72, max_period=10 * 86_400):
+    """Where in its current short orbit the craft should burn for `target` (it waits for it).
+
+    From a parking orbit the place you leave from matters a lot (leaving from the
+    wrong side of Earth for the Moon costs several times more). Scans one lap with
+    a quick Lambert estimate and returns the coasting state at the cheapest point.
+    Long orbits (e.g. around the Sun) are returned unchanged.
+    """
+    el = state.elements
+    period = el.period(state.mu)
+    if el.e >= 1 or period > max_period:
+        return state
+    rt, _ = bodies.body_state(target, et_arrive)
+    best, best_dv = state, math.inf
+    for k in range(samples):
+        t = state.et + period * k / samples
+        if t >= et_arrive - 0.5 * 86_400:
+            break
+        r, v = kepler.propagate(state.r, state.v, t - state.et, state.mu)
+        v1, _ = lambert(r, rt, et_arrive - t, state.mu)
+        dv = float(np.linalg.norm(v1 - v))
+        if dv < best_dv:
+            best, best_dv = State(state.body, t, r, v), dv
+    return best
+
+
+def landing_burn(state, craft, body, et_arrive=None):
+    """The burn at `state` that ends with the craft touching down on `body`.
+
+    Orbiting `body` already: a de-orbit burn. Orbiting its parent (e.g. the Sun
+    for Mars, Earth for the Moon): aims the arrival at the surface, reaching it
+    around `et_arrive`. Raises PlanningError otherwise, or if fuel is short.
+    """
+    b = BODIES[body]
+    if state.body == body:
+        burn = deorbit_burn(state)
+    elif state.body == b.parent:
+        if et_arrive is None:
+            raise PlanningError(f"Say when to arrive at {body}")
+        state = best_departure_point(state, body, et_arrive)
+        burn, _ = aim_burn(state, craft, body, et_arrive, (LANDING_DEPTH - 1) * b.radius)
+    else:
+        raise PlanningError(f"To land on {body} the craft must be orbiting {body} or {b.parent} "
+                            f"when the burn starts (it is orbiting {state.body} then)")
+    if burn.dv > craft.dv_remaining:
+        raise PlanningError(f"Landing on {body} from there needs a {burn.dv:.2f} km/s burn, but the "
+                            f"craft only has {max(0.0, craft.dv_remaining):.2f} km/s left")
+    return burn
 
 
 def capture_burn(traj, target):

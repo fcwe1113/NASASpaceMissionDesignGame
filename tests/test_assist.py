@@ -3,7 +3,7 @@ import math
 import numpy as np
 import pytest
 
-from game.mission import Mission
+from game.mission import Flight
 from physics import BODIES, Craft, ephemeris, fly
 from physics import planning
 from physics.assist import MIN_FLYBY_ALT, assist_burn, assist_search, flyby_geometry
@@ -72,7 +72,7 @@ def test_search_needs_three_different_bodies():
 def evm_mission(evm_2030):
     f, m, k = evm_2030.best("fuel")
     depart, flyby, arrive = evm_2030.route(f, m, k)
-    return Mission.via_assist("Venus assist", "Mars", CRAFT, depart, flyby, arrive,
+    return Flight.via_assist("Venus assist", "Mars", CRAFT, depart, flyby, arrive,
                               evm_2030.v_inf_depart[f, m], "Venus"), (depart, flyby, arrive)
 
 
@@ -132,7 +132,7 @@ def test_hand_built_assist_with_automatic_arrival(evm_2030):
     """A plain trip to Venus, then 'fly past Venus to Mars' with the arrival left to auto."""
     f, m, k = evm_2030.best("fuel")
     depart, flyby, arrive = evm_2030.route(f, m, k)
-    mission = Mission.to_planet("Hand built", "Venus", CRAFT, depart, flyby, evm_2030.v_inf_depart[f, m])
+    mission = Flight.to_planet("Hand built", "Venus", CRAFT, depart, flyby, evm_2030.v_inf_depart[f, m])
     exit_et = planning.soi_exit_time(mission.trajectory, "Earth")
     note = mission.add_assist(exit_et + DAY, "Venus", flyby, "Mars")
     assert "bends the path" in note and "touch-up" in note
@@ -158,7 +158,7 @@ def test_outcome_names_the_last_body_passed(evm_2030):
     """A mission set up as a Venus trip, extended past Venus to Mars, reports the Mars pass."""
     f, m, k = evm_2030.best("fuel")
     depart, flyby, _ = evm_2030.route(f, m, k)
-    mission = Mission.to_planet("Hand built", "Venus", CRAFT, depart, flyby, evm_2030.v_inf_depart[f, m])
+    mission = Flight.to_planet("Hand built", "Venus", CRAFT, depart, flyby, evm_2030.v_inf_depart[f, m])
     mission.add_assist(planning.soi_exit_time(mission.trajectory, "Earth") + DAY, "Venus", flyby, "Mars")
     out = mission.outcome
     assert out.kind == "flyby" and out.body == "Mars"

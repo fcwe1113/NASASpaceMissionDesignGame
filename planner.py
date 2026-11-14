@@ -1,10 +1,15 @@
 """Mission planner window (new missions, and viewing/changing ones already planned or flying).
 
-The window edits a copy of the mission ("draft"). Nothing changes in the
-campaign until Schedule/Save, and saving an active mission goes through
-Mission.set_plan, which refuses changes to burns that have already happened.
+A mission is one launch of one or more craft. Each craft is built from
+catalogue parts (Build craft tab) and has its own route (Route tab); the first
+craft given a route sets the launch date for all of them.
+
+The window edits copies ("drafts"). Nothing changes in the campaign until
+Schedule/Save, and saving an active mission goes through Flight.set_plan,
+which refuses changes to burns that have already happened.
 """
 import copy
+from dataclasses import dataclass, replace
 import math
 from types import SimpleNamespace
 import tkinter as tk
@@ -12,8 +17,10 @@ from tkinter import messagebox, ttk
 
 import numpy as np
 
-from game.mission import ACTIVE, PENDING, Mission, PlanError
-from physics import BODIES, Burn, Craft, LONG_BURN, ephemeris, fly, porkchop
+from game import catalogue as catalogue_module
+from game.design import BAD, INFO, OK, WARN, CraftDesign, assess, starter_design
+from game.mission import ACTIVE, PENDING, Flight, Mission, PlanError
+from physics import BODIES, Burn, LONG_BURN, ephemeris, fly, porkchop
 from physics import planning
 from physics.assist import assist_search
 from physics.planning import PlanningError
@@ -24,8 +31,17 @@ TARGETS = ["Earth orbit", "Moon", "Mercury", "Venus", "Mars"]
 # Flight-time range (days) searched for each planet
 TOF_RANGE = {"Mercury": (60, 200), "Venus": (70, 250), "Mars": (120, 450)}
 ASSIST_LEG2_RANGE = (80, 500)      # days from the flyby planet on to the target
-DEFAULT_CRAFT = Craft(dry_mass=2000, fuel=12_000, isp=320, thrust=50_000)
 PREVIEW_KEY = "__preview__"
+LEVEL_COLOURS = {OK: "#2a7", WARN: "#c80", BAD: "#c33", INFO: "#777"}
+
+
+@dataclass
+class CraftDraft:
+    """One craft being planned: its design, target and (once it has a route) its flight."""
+    name: str
+    design: CraftDesign
+    target: str = "Mars"             # one of TARGETS
+    flight: Flight | None = None
 
 
 def date_str(et, with_time=True):
@@ -228,12 +244,22 @@ class MissionPlanner(tk.Toplevel):
         self.view = page.view
         self.now = self.view.sim_et
         self.original = mission
-        self.draft = copy.deepcopy(mission) if mission else None
+        self.catalogue = catalogue_module.default()
+        if mission:
+            self.crafts = []
+            for f in mission.flights:
+                f = copy.deepcopy(f)
+                design = f.design or starter_design()
+                self.crafts.append(CraftDraft(f.name, design, "Earth orbit" if f.target == "Earth" else f.target, f))
+        else:
+            self.crafts = [CraftDraft("Craft 1", starter_design())]
+        self.cur = 0                   # index of the craft being edited
         self.pc = None
         self.assist_grid = None        # gravity-assist search behind the chart, if "Via" is set
+        self._preview_keys = set()
         self.title(f"Mission: {mission.name}" if mission else "New mission")
-        self.geometry("1360x820")
-        self.minsize(1330, 760)
+        self.geometry("1400x880")
+        self.minsize(1370, 820)
 
         # Pause the clock while planning; restore it on close
         self._was_paused = self.view.paused
@@ -247,8 +273,15 @@ class MissionPlanner(tk.Toplevel):
         right = ttk.Frame(self, padding=8)
         right.grid(row=0, column=1, sticky="nsew")
         self._build_mission(left)
-        self._build_craft(left)
-        self._build_launch(left)
+        left_tabs = ttk.Notebook(left)
+        left_tabs.pack(fill="both", expand=True, pady=(8, 0))
+        build_tab = ttk.Frame(left_tabs, padding=6)
+        left_tabs.add(build_tab, text="Build craft")
+        route_tab = ttk.Frame(left_tabs, padding=6)
+        left_tabs.add(route_tab, text="Route")
+        self._build_craft(build_tab)
+        self._build_launch(route_tab)
+        self._build_health(left)
         self._build_summary(right)
         tabs = ttk.Notebook(right)
         tabs.pack(fill="both", expand=True, pady=(6, 0))
@@ -263,47 +296,120 @@ class MissionPlanner(tk.Toplevel):
 
         self.status = ttk.Label(self, foreground="#a33", wraplength=1100, padding=(8, 0))
         self.status.grid(row=2, column=0, columnspan=2, sticky="w")
-        self._apply_locks()
-        if self.draft:
-            self.horizon.set(f"{(self.draft.horizon_et - self.draft.launch_et) / DAY:.0f}")
-        self._refresh()
+        self._select_craft(0)
 
     # ----- layout -----
     def _build_mission(self, parent):
-        box = ttk.LabelFrame(parent, text="Mission", padding=6)
+        box = ttk.LabelFrame(parent, text="Mission (one launch)", padding=6)
         box.pack(fill="x")
         default_name = self.original.name if self.original else self.control.unique_name("Mission")
         self.name = LabeledEntry(box, "Name", default_name, width=24)
         self.name.pack(anchor="w")
         row = ttk.Frame(box)
         row.pack(anchor="w", pady=2)
+        ttk.Label(row, text="Craft", width=16).pack(side="left")
+        self.craft_var = tk.StringVar()
+        self.craft_box = ttk.Combobox(row, textvariable=self.craft_var, state="readonly", width=14)
+        self.craft_box.pack(side="left")
+        self.craft_box.bind("<<ComboboxSelected>>", lambda e: self._select_craft(self.craft_box.current()))
+        self.add_craft_btn = ttk.Button(row, text="Add craft", command=self._add_craft)
+        self.add_craft_btn.pack(side="left", padx=4)
+        self.remove_craft_btn = ttk.Button(row, text="Remove", command=self._remove_craft)
+        self.remove_craft_btn.pack(side="left")
+        self.craft_name = LabeledEntry(box, "Craft name", "", width=24)
+        self.craft_name.pack(anchor="w")
+        self.craft_name.entry.bind("<FocusOut>", lambda e: self._rename_craft())
+        self.craft_name.entry.bind("<Return>", lambda e: self._rename_craft())
+        self.mission_info = ttk.Label(box, foreground="#555", wraplength=500, justify="left")
+        self.mission_info.pack(anchor="w", pady=(4, 0))
+
+    def _build_craft(self, parent):
+        """The craft builder: launcher, stage, fuel, crew and modules from the catalogue."""
+        cat = self.catalogue
+        self.launcher_ids = list(cat.launchers)
+        self.stage_ids = list(cat.stages)
+        self.module_ids = list(cat.modules)
+
+        def picker(label, values):
+            row = ttk.Frame(parent)
+            row.pack(anchor="w", pady=1)
+            ttk.Label(row, text=label, width=12).pack(side="left")
+            box = ttk.Combobox(row, values=values, state="readonly", width=46)
+            box.pack(side="left")
+            return box
+
+        self.launcher_box = picker("Launcher", [
+            f"{l.name} — lifts {l.payload_kg / 1000:,.0f} t, ${l.cost_musd:,.0f}M"
+            + (f"  (tier {l.tier})" if l.tier else "") for l in cat.launchers.values()])
+        self.stage_box = picker("Stage", [
+            f"{s.name} — Isp {s.isp_s:,.0f} s" + (", can relaunch" if s.relaunch else "")
+            + (f"  (tier {s.tier})" if s.tier else "") for s in cat.stages.values()])
+        for box in (self.launcher_box, self.stage_box):
+            box.bind("<<ComboboxSelected>>", lambda e: self._design_changed())
+
+        row = ttk.Frame(parent)
+        row.pack(anchor="w", pady=1)
+        ttk.Label(row, text="Fuel", width=12).pack(side="left")
+        self.fuel_var = tk.StringVar()
+        self.fuel_entry = ttk.Entry(row, textvariable=self.fuel_var, width=10)
+        self.fuel_entry.pack(side="left")
+        self.fuel_max = ttk.Label(row, foreground="#555")
+        self.fuel_max.pack(side="left", padx=4)
+        self.fill_btn = ttk.Button(row, text="Fill tank", command=self._fill_tank)
+        self.fill_btn.pack(side="left")
+        ttk.Label(row, text="Crew", width=6).pack(side="left", padx=(12, 0))
+        self.crew_var = tk.StringVar()
+        self.crew_spin = ttk.Spinbox(row, from_=0, to=20, textvariable=self.crew_var, width=4)
+        self.crew_spin.pack(side="left")
+        for var in (self.fuel_var, self.crew_var):
+            var.trace_add("write", lambda *_: self._design_changed())
+
+        self.module_tree = ttk.Treeview(parent, columns=("name", "count", "mass", "power", "cost"),
+                                        show="headings", height=8, selectmode="browse")
+        for key, text, w in [("name", "Module", 190), ("count", "On board", 65), ("mass", "Mass", 60),
+                             ("power", "Power", 60), ("cost", "Cost", 60)]:
+            self.module_tree.heading(key, text=text)
+            self.module_tree.column(key, width=w, anchor="w" if key == "name" else "e")
+        self.module_tree.pack(fill="x", pady=(6, 0))
+        self.module_tree.bind("<<TreeviewSelect>>", lambda e: self._show_module_info())
+        self.module_tree.bind("<Double-1>", lambda e: self._change_module(+1))
+        row = ttk.Frame(parent)
+        row.pack(anchor="w", pady=4)
+        self.module_buttons = [ttk.Button(row, text="Add one", command=lambda: self._change_module(+1)),
+                               ttk.Button(row, text="Remove one", command=lambda: self._change_module(-1))]
+        for b in self.module_buttons:
+            b.pack(side="left", padx=(0, 4))
+        self.part_info = ttk.Label(parent, foreground="#555", wraplength=500, justify="left")
+        self.part_info.pack(anchor="w")
+        self._loading_design = False
+
+    def _build_health(self, parent):
+        box = ttk.LabelFrame(parent, text="Craft check", padding=6)
+        box.pack(fill="x", pady=(8, 0))
+        self.health_rows = []
+        for _ in range(7):
+            row = ttk.Frame(box)
+            row.pack(anchor="w")
+            dot = tk.Label(row, text="●", font=("TkDefaultFont", 11))
+            dot.pack(side="left")
+            name = ttk.Label(row, width=12, font=("TkDefaultFont", 9, "bold"))
+            name.pack(side="left")
+            text = ttk.Label(row, wraplength=420, justify="left")
+            text.pack(side="left")
+            self.health_rows.append((dot, name, text))
+
+    def _build_launch(self, parent):
+        row = ttk.Frame(parent)
+        row.pack(anchor="w", pady=(0, 4))
         ttk.Label(row, text="Target", width=16).pack(side="left")
-        target = "Mars"
-        if self.original:
-            target = "Earth orbit" if self.original.target == "Earth" else self.original.target
-        self.target = tk.StringVar(value=target)
+        self.target = tk.StringVar(value="Mars")
         self.target_box = ttk.Combobox(row, textvariable=self.target, values=TARGETS, state="readonly", width=14)
         self.target_box.pack(side="left")
         self.target_box.bind("<<ComboboxSelected>>", lambda e: self._target_changed())
-
-    def _build_craft(self, parent):
-        box = ttk.LabelFrame(parent, text="Craft (fixed after launch)", padding=6)
-        box.pack(fill="x", pady=(8, 0))
-        c = self.original.craft if self.original else DEFAULT_CRAFT
-        self.dry = LabeledEntry(box, "Dry mass", c.dry_mass, unit="kg")
-        self.fuel = LabeledEntry(box, "Fuel", c.fuel, unit="kg")
-        self.isp = LabeledEntry(box, "Engine Isp", c.isp, unit="s")
-        self.thrust = LabeledEntry(box, "Thrust", c.thrust, unit="N")
-        for w in (self.dry, self.fuel, self.isp, self.thrust):
-            w.pack(anchor="w")
-            w.var.trace_add("write", lambda *_: self._craft_changed())
-        self.craft_info = ttk.Label(box, foreground="#555")
-        self.craft_info.pack(anchor="w", pady=(4, 0))
-
-    def _build_launch(self, parent):
-        self.launch_box = ttk.LabelFrame(parent, text="Launch (fixed after launch)", padding=6)
-        self.launch_box.pack(fill="both", expand=True, pady=(8, 0))
-        self._launch_widgets()
+        self.clear_route_btn = ttk.Button(row, text="Clear route", command=self._clear_route)
+        self.clear_route_btn.pack(side="left", padx=6)
+        self.launch_box = ttk.Frame(parent)
+        self.launch_box.pack(fill="both", expand=True)
 
     def _launch_widgets(self):
         for w in self.launch_box.winfo_children():
@@ -312,21 +418,30 @@ class MissionPlanner(tk.Toplevel):
         target = self.target.get()
         today = date_str(self.now, False)
         tomorrow = date_str(self.now + DAY, False)   # a date-only "today" is already in the past
+        fixed = self._fixed_launch()
+        if fixed:
+            ttk.Label(box, foreground="#555", wraplength=500, justify="left", text=(
+                f"Launch date {date_str(fixed[1])}, set by {fixed[0]}: all craft in a mission launch "
+                f"together. Clear {fixed[0]}'s route to choose another date.")).pack(anchor="w", pady=(0, 4))
         if target in TOF_RANGE:
             self.search_from = LabeledEntry(box, "Search from", today, width=14)
-            self.search_from.pack(anchor="w")
             self.search_span = LabeledEntry(box, "Search span", 800, unit="days")
-            self.search_span.pack(anchor="w")
+            if not fixed:
+                self.search_from.pack(anchor="w")
+                self.search_span.pack(anchor="w")
             self.arrive_alt = LabeledEntry(box, "Pass target at", 300, unit="km altitude")
             self.arrive_alt.pack(anchor="w")
+            self._land_checkbox(box)
             via_row = ttk.Frame(box)
             via_row.pack(anchor="w")
             ttk.Label(via_row, text="Via (gravity assist)", width=16).pack(side="left")
             self.via = tk.StringVar(value="None")
-            via_box = ttk.Combobox(via_row, textvariable=self.via, state="readonly", width=12,
-                                   values=["None"] + [p for p in ("Mercury", "Venus", "Mars") if p != target])
+            via_box = ttk.Combobox(via_row, textvariable=self.via, state="disabled" if fixed else "readonly",
+                                   width=12, values=["None"] + [p for p in ("Mercury", "Venus", "Mars") if p != target])
             via_box.pack(side="left")
             via_box.bind("<<ComboboxSelected>>", lambda e: self._via_changed())
+            if fixed:
+                ttk.Label(via_row, text="(use Gravity assist… on the burns)", foreground="#777").pack(side="left", padx=4)
             row = ttk.Frame(box)
             row.pack(anchor="w", pady=4)
             self.find_btn = ttk.Button(row, text="Find launch windows", command=self._find_windows)
@@ -340,13 +455,16 @@ class MissionPlanner(tk.Toplevel):
             self.pick_info = ttk.Label(box, justify="left")
             self.pick_info.pack(anchor="w")
         else:
-            self.launch_date = LabeledEntry(box, "Launch date", tomorrow, width=18)
+            self.launch_date = LabeledEntry(box, "Launch date", date_str(fixed[1]) if fixed else tomorrow, width=18)
             self.launch_date.pack(anchor="w")
+            if fixed:
+                self.launch_date.lock()
             if target == "Moon":
                 self.moon_tof = LabeledEntry(box, "Flight time", 4, unit="days")
                 self.moon_tof.pack(anchor="w")
                 self.arrive_alt = LabeledEntry(box, "Pass Moon at", 100, unit="km altitude")
                 self.arrive_alt.pack(anchor="w")
+                self._land_checkbox(box)
                 text = "Plan transfer"
             else:
                 self.orbit_alt = LabeledEntry(box, "Orbit altitude", 200, unit="km")
@@ -383,6 +501,7 @@ class MissionPlanner(tk.Toplevel):
             ttk.Button(row, text="Aim at a body…", command=self._aim),
             ttk.Button(row, text="Gravity assist…", command=self._gravity_assist),
             ttk.Button(row, text="Capture into orbit…", command=self._capture),
+            ttk.Button(row, text="Land…", command=self._land),
         ]
         for b in self.burn_buttons:
             b.pack(side="left", padx=(0, 4))
@@ -427,7 +546,7 @@ class MissionPlanner(tk.Toplevel):
         if status == PENDING:
             ttk.Button(row, text="Cancel launch", command=self._cancel_launch).pack(side="left")
         if status == ACTIVE:
-            self.declare_btn = ttk.Button(row, text="Declare mission complete", command=self._declare)
+            self.declare_btn = ttk.Button(row, text="Declare this craft's flight complete", command=self._declare)
             self.declare_btn.pack(side="left")
 
     # ----- state helpers -----
@@ -435,11 +554,31 @@ class MissionPlanner(tk.Toplevel):
     def launched(self):
         return self.original is not None and self.original.status != PENDING
 
+    @property
+    def craft(self):
+        """The CraftDraft being edited."""
+        return self.crafts[self.cur]
+
+    @property
+    def draft(self):
+        """The flight of the craft being edited (None until it has a route)."""
+        return self.craft.flight
+
+    def _fixed_launch(self):
+        """(craft name, launch time) if another craft already set the launch date, else None."""
+        for k, c in enumerate(self.crafts):
+            if k != self.cur and c.flight is not None:
+                return c.name, c.flight.launch_et
+        return None
+
     def _apply_locks(self):
         locked = self.launched
-        for w in (self.dry, self.fuel, self.isp, self.thrust):
-            w.lock(locked)
-        self.target_box.config(state="disabled" if locked else "readonly")
+        state = "disabled" if locked else "readonly"
+        for w in (self.launcher_box, self.stage_box, self.target_box):
+            w.config(state=state)
+        for w in (self.fuel_entry, self.crew_spin, self.fill_btn, self.add_craft_btn, self.remove_craft_btn,
+                  self.clear_route_btn, *self.module_buttons):
+            w.config(state="disabled" if locked else "normal")
         if locked:
             for w in self.launch_box.winfo_children():
                 if isinstance(w, (ttk.Button, ttk.Entry)):
@@ -451,11 +590,11 @@ class MissionPlanner(tk.Toplevel):
                 self.chart.unbind("<Button-1>")
 
     def _craft(self):
-        c = Craft(parse_float(self.dry.get(), "Dry mass"), parse_float(self.fuel.get(), "Fuel"),
-                  parse_float(self.isp.get(), "Isp"), parse_float(self.thrust.get(), "Thrust"))
-        if c.dry_mass <= 0 or c.fuel < 0 or c.isp <= 0 or c.thrust <= 0:
-            raise PlanError("Masses, Isp and thrust must be positive")
-        return c
+        """The physics craft for the current design."""
+        return self.craft.design.physics_craft(self.catalogue)
+
+    def _craft_name(self):
+        return self.craft.name
 
     def _target_body(self):
         t = self.target.get()
@@ -467,29 +606,163 @@ class MissionPlanner(tk.Toplevel):
     def _info(self, text):
         self.status.config(text=text, foreground="#555")
 
-    # ----- craft and target -----
-    def _craft_changed(self):
-        try:
-            c = self._craft()
-        except PlanError as exc:
-            self.craft_info.config(text=str(exc))
-            return
-        self.craft_info.config(text=f"Δv available: {c.dv_remaining:.2f} km/s   "
-                                    f"(full-tank burn takes {c.fuel / c.mass_flow / DAY:.2f} days)")
-        if self.draft and not self.launched:
-            self.draft.set_craft(c)
-            self._refresh()
+    # ----- crafts -----
+    def _select_craft(self, index):
+        self.cur = max(0, min(index, len(self.crafts) - 1))
+        c = self.craft
+        self.craft_box.config(values=[x.name for x in self.crafts])
+        self.craft_box.current(self.cur)
+        self.craft_name.set(c.name)
+        self.target.set(c.target)
+        self._load_design(c.design)
+        self.pc = self.assist_grid = None
+        self._launch_widgets()
+        self._apply_locks()
+        if self.draft:
+            self.horizon.set(f"{(self.draft.horizon_et - self.draft.launch_et) / DAY:.0f}")
+        self._refresh()
 
+    def _add_craft(self):
+        names = {c.name for c in self.crafts}
+        k = len(self.crafts) + 1
+        while f"Craft {k}" in names:
+            k += 1
+        self.crafts.append(CraftDraft(f"Craft {k}", starter_design()))
+        self._select_craft(len(self.crafts) - 1)
+        self._info("New craft added: build it, then give it a route. It launches with the others.")
+
+    @_guard
+    def _remove_craft(self):
+        if len(self.crafts) == 1:
+            raise PlanError("A mission needs at least one craft")
+        if not messagebox.askyesno("Remove craft", f"Remove {self.craft.name}?", parent=self):
+            return
+        self.crafts.pop(self.cur)
+        self._select_craft(self.cur - 1)
+
+    @_guard
+    def _rename_craft(self):
+        name = self.craft_name.get().strip()
+        if not name or name == self.craft.name:
+            return
+        if any(c.name == name for c in self.crafts):
+            self.craft_name.set(self.craft.name)
+            raise PlanError(f"There is already a craft called {name!r}")
+        self.craft.name = name
+        if self.craft.flight is not None:
+            self.craft.flight.name = name
+        self.craft_box.config(values=[x.name for x in self.crafts])
+        self.craft_box.current(self.cur)
+        self._refresh()
+
+    # ----- craft design -----
+    def _load_design(self, d):
+        """Show a design in the builder (without triggering change handlers)."""
+        self._loading_design = True
+        self.launcher_box.current(self.launcher_ids.index(d.launcher))
+        self.stage_box.current(self.stage_ids.index(d.stage))
+        self.fuel_var.set(f"{d.fuel_kg:.0f}")
+        self.crew_var.set(str(d.crew))
+        self._loading_design = False
+        self._fill_module_tree()
+
+    def _read_design(self):
+        """The design as the builder shows it now."""
+        try:
+            fuel = float(self.fuel_var.get())
+            crew = int(self.crew_var.get())
+        except ValueError:
+            raise PlanError("Fuel and crew must be numbers")
+        return replace(self.craft.design, launcher=self.launcher_ids[self.launcher_box.current()],
+                       stage=self.stage_ids[self.stage_box.current()], fuel_kg=fuel, crew=crew)
+
+    def _design_changed(self):
+        if self._loading_design or self.launched:
+            return
+        try:
+            d = self._read_design()
+        except PlanError as exc:
+            self._error(exc)
+            return
+        self._apply_design(d)
+
+    def _apply_design(self, d):
+        self.craft.design = d
+        cap = self.catalogue.stages[d.stage].fuel_capacity_kg
+        self.fuel_max.config(text=f"of {cap:,.0f} kg")
+        if self.draft is not None:
+            self.draft.set_design(d)
+        self._refresh()
+
+    def _fill_tank(self):
+        stage = self.catalogue.stages[self.stage_ids[self.stage_box.current()]]
+        self.fuel_var.set(f"{stage.fuel_capacity_kg:.0f}")
+
+    def _fill_module_tree(self):
+        sel = self.module_tree.selection()
+        self.module_tree.delete(*self.module_tree.get_children())
+        d = self.craft.design
+        for mid in self.module_ids:
+            m = self.catalogue.modules[mid]
+            n = d.modules.get(mid, 0)
+            power = f"{m.power_kw:+.1f} kW" if m.power_kw else ""
+            self.module_tree.insert("", "end", iid=mid, values=(
+                m.name + (f"  (tier {m.tier})" if m.tier else ""), n if n else "",
+                f"{m.mass_kg / 1000:.1f} t", power, f"${m.cost_musd:,.0f}M"),
+                tags=("onboard",) if n else ())
+        self.module_tree.tag_configure("onboard", background="#dff3e4")
+        self.fuel_max.config(text=f"of {self.catalogue.stages[d.stage].fuel_capacity_kg:,.0f} kg")
+        if sel and self.module_tree.exists(sel[0]):
+            self.module_tree.selection_set(sel)
+
+    def _show_module_info(self):
+        sel = self.module_tree.selection()
+        if sel:
+            m = self.catalogue.modules[sel[0]]
+            self.part_info.config(text=f"{m.name}: {m.description}")
+
+    @_guard
+    def _change_module(self, delta):
+        if self.launched:
+            raise PlanError("The craft can't change after launch")
+        sel = self.module_tree.selection()
+        if not sel:
+            raise PlanError("Select a module first")
+        d = self.craft.design
+        modules = dict(d.modules)
+        modules[sel[0]] = max(0, modules.get(sel[0], 0) + delta)
+        self._apply_design(replace(d, modules={k: v for k, v in modules.items() if v}))
+        self._fill_module_tree()
+
+    # ----- target and route -----
     def _target_changed(self):
-        self.draft = None
+        self.craft.target = self.target.get()
+        self.craft.flight = None
         self.pc = self.assist_grid = None
         self._launch_widgets()
         self._refresh()
+
+    def _clear_route(self):
+        if self.craft.flight is None:
+            return
+        self.craft.flight = None
+        self._launch_widgets()
+        self._refresh()
+        self._info(f"{self.craft.name}'s route was cleared")
 
     # ----- launch: planets -----
     @_guard
     def _find_windows(self):
         target = self._target_body()
+        fixed = self._fixed_launch()
+        if fixed:
+            # Launch date set by another craft: only the flight time is free
+            self.assist_grid = None
+            lo, hi = TOF_RANGE[target]
+            self.pc = porkchop("Earth", target, np.array([fixed[1]]), np.linspace(lo, hi, 120) * DAY)
+            self.chart.show(self.pc, self._craft().dv_remaining, x_label=f"Launch date fixed by {fixed[0]}")
+            self._pick_best("fuel")
+            return
         start = max(parse_date(self.search_from.get()), self.now)
         span = parse_float(self.search_span.get(), "Search span")
         if not 10 <= span <= 5000:
@@ -560,11 +833,15 @@ class MissionPlanner(tk.Toplevel):
             f"orbit capture {g.dv_arrive[f, k]:.2f}, total {g.dv_total[f, m, k]:.2f} km/s; "
             f"{via} pass {g.flyby_alt[f, m, k]:,.0f} km up"))
         alt = parse_float(self.arrive_alt.get(), "Pass altitude")
-        draft = Mission.via_assist(self.name.get().strip() or "Mission", target, self._craft(),
+        draft = Flight.via_assist(self._craft_name(), target, self._craft(),
                                    dep, fb, arr, g.v_inf_depart[f, m], via, alt)
         self._info(f"Gravity assist planned: {via} bends the path {draft.assist.turn_deg:.0f}°. "
                    f"Burns: departure, flyby set-up, a touch-up after {via}. "
                    f"Add a capture burn to stay at {target}.")
+        out_et = planning.soi_exit_time(draft.trajectory, via)
+        if self.land_var.get() and out_et is not None:
+            self._info(f"{via} bends the path {draft.assist.turn_deg:.0f}°; "
+                       + draft.add_landing(out_et + DAY, target, arr))
         self._set_draft(draft)
 
     @_guard
@@ -582,12 +859,14 @@ class MissionPlanner(tk.Toplevel):
             f"Departure burn {pc.dv_depart[i, j]:.2f} km/s, orbit capture {pc.dv_arrive[i, j]:.2f} km/s, "
             f"total {pc.dv_total[i, j]:.2f} km/s   (C3 {pc.c3[i, j]:.1f} km²/s²)"))
         craft = self._craft()
-        draft = Mission.to_planet(self.name.get().strip() or "Mission", self._target_body(), craft,
+        draft = Flight.to_planet(self._craft_name(), self._target_body(), craft,
                                   dep, dep + tof, pc.v_inf_depart[i, j])
         # Patched conics leave a small miss from Earth's SOI; aim properly a day after leaving it
         alt = parse_float(self.arrive_alt.get(), "Pass altitude")
         exit_et = planning.soi_exit_time(draft.trajectory, "Earth")
-        if exit_et is not None and exit_et + DAY < dep + tof:
+        if self.land_var.get() and exit_et is not None:
+            self._info(draft.add_landing(exit_et + DAY, self._target_body(), dep + tof))
+        elif exit_et is not None and exit_et + DAY < dep + tof:
             before = fly(draft.start, craft, draft.burns, exit_et + DAY)
             aim, got = planning.aim_burn(before.end, before.craft, self._target_body(), dep + tof, alt)
             draft.set_plan(draft.burns + [aim])
@@ -598,27 +877,33 @@ class MissionPlanner(tk.Toplevel):
     # ----- launch: Moon / Earth orbit -----
     @_guard
     def _set_simple_launch(self):
-        et = parse_date(self.launch_date.get())
+        fixed = self._fixed_launch()
+        et = fixed[1] if fixed else parse_date(self.launch_date.get())
         if et < self.now:
             raise PlanError("Launch can't be in the past")
         craft = self._craft()
-        name = self.name.get().strip() or "Mission"
+        name = self._craft_name()
         if self.target.get() == "Moon":
             tof = parse_float(self.moon_tof.get(), "Flight time")
             if not 2 <= tof <= 10:
                 raise PlanError("Flight time to the Moon should be 2-10 days")
-            draft = Mission.to_moon(name, craft, et, tof * DAY,
-                                    parse_float(self.arrive_alt.get(), "Pass altitude"))
+            draft = Flight.to_moon(name, craft, et, tof * DAY,
+                                   parse_float(self.arrive_alt.get(), "Pass altitude"))
+            if self.land_var.get():
+                self._info(draft.add_landing(et, "Moon", et + tof * DAY))
         else:
             alt = parse_float(self.orbit_alt.get(), "Orbit altitude")
             if alt < 100:
                 raise PlanError("Orbit altitude must be at least 100 km")
-            draft = Mission.earth_orbit(name, craft, et, alt)
+            draft = Flight.earth_orbit(name, craft, et, alt)
         self._set_draft(draft)
 
-    def _set_draft(self, draft):
-        self.draft = draft
-        self.horizon.set(f"{(draft.horizon_et - draft.launch_et) / DAY:.0f}")
+    def _set_draft(self, flight):
+        """Give the current craft this flight (built from its design)."""
+        flight.name = self.craft.name
+        flight.design = self.craft.design
+        self.craft.flight = flight
+        self.horizon.set(f"{(flight.horizon_et - flight.launch_et) / DAY:.0f}")
         self._refresh()
 
     # ----- burns -----
@@ -769,6 +1054,48 @@ class MissionPlanner(tk.Toplevel):
         self._refresh()
         self._info(note)
 
+    def _land_checkbox(self, box):
+        self.land_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(box, text="Land on arrival (instead of passing by)",
+                        variable=self.land_var).pack(anchor="w")
+
+    @_guard
+    def _land(self):
+        """Dialog: touch down on a body, from orbit around it or by aiming the arrival at it."""
+        self._need_draft()
+        d = self.draft
+        body = self._target_body()
+        traj = d.trajectory
+        orbiting = traj.segments[-1].body == body and traj.end_reason != "impact"
+        if orbiting:
+            burn_et, arrive = self._default_aim_time(math.inf), None
+        else:
+            visit = planning.first_visit(traj, body)
+            passes = [a for a in planning.closest_approaches(traj) if a.body == body]
+            arrive = visit.start.et if visit else (passes[0].et if passes else self._default_aim_time(math.inf) + 200 * DAY)
+            exits = [e.et for e in traj.events if e.kind == "soi_exit" and e.et < arrive]
+            burn_et = (max(exits) + DAY) if exits else d.launch_et
+            burn_et = max(burn_et, self.now + 60) if self.launched else burn_et
+        res = FormDialog(self, "Land", [
+            ("body", "Land on", self._body_choices(), ""),
+            ("t", "Burn at", f"{(burn_et - d.launch_et) / DAY:.2f}", "days after launch"),
+            ("arrive", "Touch down around", "" if arrive is None else f"{(arrive - d.launch_et) / DAY:.2f}",
+             "days after launch (not needed when already orbiting it)"),
+        ], note="Orbiting the body at the burn time: a retrograde de-orbit burn. Orbiting its parent "
+                "(the Sun for a planet, Earth for the Moon): the arrival is aimed at the surface; from "
+                "a short parking orbit the craft waits for the cheapest point of its lap. Later burns "
+                "are replaced. Landing is free in this game, taking off again isn't.").ask()
+        if res is None:
+            return
+        t = d.launch_et + parse_float(res["t"], "Burn time") * DAY
+        self._check_not_past(t)
+        arrive_text = res["arrive"].strip()
+        arrive_et = d.launch_et + parse_float(arrive_text, "Touchdown time") * DAY if arrive_text else None
+        note = d.add_landing(t, res["body"], arrive_et)
+        self.horizon.set(f"{(d.horizon_et - d.launch_et) / DAY:.0f}")
+        self._refresh()
+        self._info(note)
+
     def _default_aim_time(self, arrive):
         """A day after the last thing that happens before `arrive` (a burn, or leaving an SOI)."""
         d = self.draft
@@ -804,15 +1131,18 @@ class MissionPlanner(tk.Toplevel):
 
     # ----- refresh -----
     def _refresh(self):
-        self._craft_changed_info()
         self.burn_tree.delete(*self.burn_tree.get_children())
         self.event_tree.delete(*self.event_tree.get_children())
+        self._refresh_mission_info()
+        self._refresh_health()
+        self._refresh_previews()
         d = self.draft
         if d is None:
-            self.outcome.config(text="No launch planned yet")
+            self.outcome.config(text=f"{self.craft.name}: no route yet (Route tab)", foreground="#b70")
             self.fuel_left.config(text="")
-            self.view.remove_path(PREVIEW_KEY)
             self.system_map.clear()
+            if hasattr(self, "declare_btn"):
+                self.declare_btn.config(state="disabled")
             return
         for k, b in enumerate(d.burns):
             dur = d.burn_time(b)
@@ -826,18 +1156,57 @@ class MissionPlanner(tk.Toplevel):
             self.event_tree.insert("", "end", values=(
                 date_str(e.et), f"{(e.et - d.launch_et) / DAY:.2f}", e.kind.replace("_", " "), e.body, e.note))
         out = d.outcome
-        text = out.describe()
+        text = f"{self.craft.name}: {out.describe()}"
         if out.ends_mission or out.kind == "flyby":
             text += f" on {date_str(out.et, False)}"
         if out.kind == "flyby":
             text += "\n" + self._capture_hint(d, out.body)
         self.outcome.config(text=text, foreground="#2a7" if out.ends_mission else "#b70")
         c = traj.craft
-        self.fuel_left.config(text=f"Fuel left at the end: {c.fuel:,.0f} kg ({c.dv_remaining:.2f} km/s of Δv)")
+        fuel = max(0.0, c.fuel)        # rounding can leave a hair below zero after an out-of-fuel burn
+        self.fuel_left.config(text=f"Fuel left at the end: {fuel:,.0f} kg ({max(0.0, c.dv_remaining):.2f} km/s of Δv)")
         if hasattr(self, "declare_btn"):
-            self.declare_btn.config(state="normal" if self.original.can_declare_complete(self.now) else "disabled")
-        self.view.show_path(PREVIEW_KEY, f"{self.name.get()} (plan)", traj, self.page.PREVIEW_COLOR, thickness=2)
+            live = self._live_flight()
+            self.declare_btn.config(state="normal" if live and live.can_declare_complete(self.now) else "disabled")
         self.system_map.set_trajectory(traj, [b.et for b in d.burns])
+
+    def _refresh_mission_info(self):
+        planned = [c for c in self.crafts if c.flight is not None]
+        cost = sum(c.design.cost(self.catalogue) for c in self.crafts)
+        when = f"launches {date_str(planned[0].flight.launch_et)}" if planned else "no launch date yet"
+        self.mission_info.config(text=(
+            f"{len(self.crafts)} craft, {when}; {len(planned)} of {len(self.crafts)} have a route.  "
+            f"Total cost ${cost:,.0f}M"))
+
+    def _refresh_health(self):
+        for (dot, name, text), ind in zip(self.health_rows,
+                                         assess(self.craft.design, self.draft, self.catalogue) + [None] * 7):
+            if ind is None:
+                dot.config(text=""), name.config(text=""), text.config(text="")
+                continue
+            dot.config(text="●", fg=LEVEL_COLOURS[ind.level])
+            name.config(text=ind.name)
+            text.config(text=ind.text)
+
+    def _refresh_previews(self):
+        """Every craft's planned path in the 3D view; the one being edited drawn thicker."""
+        keys = set()
+        for k, c in enumerate(self.crafts):
+            if c.flight is None:
+                continue
+            key = f"{PREVIEW_KEY}/{k}"
+            keys.add(key)
+            self.view.show_path(key, f"{c.name} (plan)", c.flight.trajectory, self.page.PREVIEW_COLOR,
+                                thickness=3 if k == self.cur else 1.5)
+        for key in self._preview_keys - keys:
+            self.view.remove_path(key)
+        self._preview_keys = keys
+
+    def _live_flight(self):
+        """The real (saved) flight of the craft being edited, for active missions."""
+        if self.original is None:
+            return None
+        return next((f for f in self.original.flights if f.name == self.craft.name), None)
 
     @staticmethod
     def _capture_hint(mission, body):
@@ -852,36 +1221,37 @@ class MissionPlanner(tk.Toplevel):
         return (f"To stay in orbit, add Capture into orbit… — needs {burn.dv:.2f} km/s, "
                 f"the craft will have {have:.2f} km/s ({enough}).")
 
-    def _craft_changed_info(self):
-        try:
-            c = self._craft()
-            self.craft_info.config(text=f"Δv available: {c.dv_remaining:.2f} km/s   "
-                                        f"(full-tank burn takes {c.fuel / c.mass_flow / DAY:.2f} days)")
-        except PlanError as exc:
-            self.craft_info.config(text=str(exc))
-
     # ----- save / close -----
     @_guard
     def _save(self):
-        self._need_draft()
         name = self.name.get().strip()
         if not name:
             raise PlanError("Give the mission a name")
+        if name != (self.original.name if self.original else None) and \
+                any(m.name == name for m in self.control.missions):
+            raise PlanError(f"There is already a mission called {name!r}")
+        for c in self.crafts:
+            if c.flight is None:
+                raise PlanError(f"{c.name} has no route yet (Route tab)")
+            problems = c.design.problems(self.catalogue)
+            if problems and not self.launched:
+                raise PlanError(f"{c.name}: {problems[0]}")
+        flights = [c.flight for c in self.crafts]
         if self.original is None:
-            if self.draft.launch_et < self.now:
+            if flights[0].launch_et < self.now:
                 raise PlanError("Launch can't be in the past")
-            self.draft.name = name
-            self.control.add(self.draft)
-            self.page.mission_changed(self.draft)
+            mission = Mission(name, flights)
+            self.control.add(mission)
+            self.page.mission_changed(mission)
+        elif self.original.status == PENDING:
+            old_names = [f.name for f in self.original.flights]
+            self.original.set_flights(flights)
+            old_name = self.original.name
+            self.original.name = name
+            self.page.mission_changed(self.original, old_name, old_flights=old_names)
         else:
-            if name != self.original.name and any(m.name == name for m in self.control.missions):
-                raise PlanError(f"There is already a mission called {name!r}")
-            if self.original.status == PENDING:
-                self.original.set_start(self.draft.start, self.draft.burns, self.draft.horizon_et)
-                self.original.set_craft(self.draft.craft)
-                self.original.target = self.draft.target
-            else:
-                self.original.set_plan(self.draft.burns, self.draft.horizon_et, now=self.now)
+            for c in self.crafts:
+                self.original.flight(c.name).set_plan(c.flight.burns, c.flight.horizon_et, now=self.now)
             old_name = self.original.name
             self.original.name = name
             self.page.mission_changed(self.original, old_name)
@@ -896,12 +1266,16 @@ class MissionPlanner(tk.Toplevel):
 
     @_guard
     def _declare(self):
-        self.original.declare_complete(self.now)
+        live = self._live_flight()
+        if live is None:
+            raise PlanError("Save the mission first")
+        live.declare_complete(self.now)
         self.page.mission_changed(self.original)
         self.close()
 
     def close(self):
-        self.view.remove_path(PREVIEW_KEY)
+        for key in self._preview_keys:
+            self.view.remove_path(key)
         self.view.paused = self._was_paused
         self.page.planner_closed(self)
         self.destroy()
