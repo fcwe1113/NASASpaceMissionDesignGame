@@ -18,8 +18,11 @@ import numpy as np
 
 # ---------- Ephemeris ----------
 HERE = Path(__file__).resolve().parent
+# de440.bsp covers 1550-2650; the smaller de440s.bsp (1849-2150) is the fallback
+EPHEMERIS = next((HERE / f for f in ("de440.bsp", "de440s.bsp") if (HERE / f).exists()),
+                 HERE / "de440.bsp")
 spice.furnsh(str(HERE / "naif0012.tls"))
-spice.furnsh(str(HERE / "de440s.bsp"))
+spice.furnsh(str(EPHEMERIS))
 
 AU_KM = 149_597_870.7
 C_KM_S = 299_792.458
@@ -29,18 +32,17 @@ MOON_EXAG = 1.0                  # true Moon distance
 DAY = 86_400.0
 
 # Exact time span the ephemeris file covers (trails are clipped to this)
-_cov = spice.wnfetd(spice.spkcov(str(HERE / "de440s.bsp"), 3), 0)
+_cov = spice.wnfetd(spice.spkcov(str(EPHEMERIS), 3), 0)
 COVER_MIN, COVER_MAX = _cov[0] + DAY, _cov[1] - DAY
 
-ET_MIN = spice.str2et("1850-01-01")   # sim clock stays inside the coverage
-ET_MAX = spice.str2et("2150-01-01")
+ET_MIN, ET_MAX = COVER_MIN, COVER_MAX   # sim clock stays inside the coverage
 
 #           SPICE id, period (days), body colour,  orbit-line colour,       mean radius (km)
 PLANETS = {
     "Mercury": ("199",  88, color.light_gray, color.light_gray.tint(-0.4), 2_439.7),
     "Venus":   ("299", 225, color.orange,     color.orange,                6_051.8),
     "Earth":   ("399", 365, color.azure,      color.azure.tint(-0.4),      6_371.0),
-    "Mars":    ("4",   687, color.red,        color.red.tint(-0.4),        3_389.5),  # barycenter (499 isn't in de440s)
+    "Mars":    ("4",   687, color.red,        color.red.tint(-0.4),        3_389.5),  # barycenter (499 isn't in de440/de440s)
 }
 SUN_RADIUS_KM = 695_700.0
 MOON_RADIUS_KM = 1_737.4

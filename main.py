@@ -4,7 +4,7 @@ in the middle, info tables on either side and control buttons underneath.
 
 Setup:
     pip install ursina spiceypy numpy
-    Put naif0012.tls and de440s.bsp in the same folder as this script.
+    Put naif0012.tls and de440.bsp (or the smaller de440s.bsp) in the same folder as this script.
 
 Mouse controls inside the 3D view:
     Right-drag      orbit camera      Scroll       zoom
@@ -15,6 +15,7 @@ from tkinter import ttk
 
 FRAME_MS = 1          # delay between rendered frames (vsync sets the real rate)
 TABLE_MS = 250        # how often the side tables refresh
+MIN_SPEED = 0.5       # days/s; the Slower button is disabled below this
 BODIES = ["Sun", "Mercury", "Venus", "Earth", "Mars", "Moon"]
 
 
@@ -80,12 +81,13 @@ class MainPage(ttk.Frame):
         tm = ttk.LabelFrame(bar, text="Time", padding=4)
         tm.pack(side="right")
         # tk.Button supports auto-repeat while held, like holding the arrow keys did
-        tk.Button(tm, text="Slower", width=7, repeatdelay=300, repeatinterval=50,
-                  command=lambda: self.view and self.view.slower()).pack(side="left", padx=2)
+        self.slower_btn = tk.Button(tm, text="Slower", width=7, repeatdelay=300, repeatinterval=50,
+                                    command=lambda: self._change_speed("slower"))
+        self.slower_btn.pack(side="left", padx=2)
         self.pause_btn = ttk.Button(tm, text="Pause", width=8, command=self._toggle_pause)
         self.pause_btn.pack(side="left", padx=2)
         tk.Button(tm, text="Faster", width=7, repeatdelay=300, repeatinterval=50,
-                  command=lambda: self.view and self.view.faster()).pack(side="left", padx=2)
+                  command=lambda: self._change_speed("faster")).pack(side="left", padx=2)
         self.time_label = ttk.Label(tm, width=28, anchor="e")
         self.time_label.pack(side="left", padx=(8, 2))
         return bar
@@ -99,6 +101,12 @@ class MainPage(ttk.Frame):
         self.view_frame.bind("<Configure>", lambda e: self.view.resize(e.width, e.height))
         self._tick()
         self._refresh_tables()
+
+    def _change_speed(self, which):
+        if self.view:
+            getattr(self.view, which)()
+            # Below MIN_SPEED the clock barely moves, so stop slowing down there
+            self.slower_btn.config(state="disabled" if self.view.days_per_second < MIN_SPEED else "normal")
 
     def _toggle_pause(self):
         if self.view:
