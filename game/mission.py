@@ -279,11 +279,25 @@ class Flight:
                 self.horizon_et = now + 30 * DAY
                 self._changed()
             out = self.outcome
-            if out.kind in ("impact", "returned") and now >= out.et:
+            starve = self.starve_et()
+            arrives = out.et if out.kind in ("impact", "returned") else math.inf
+            if starve is not None and starve < arrives and now >= starve:
+                # No grace period: the crew die the moment the food or water runs out
+                self.status = LOST
+                self.ended_et = starve
+                self.end_note = f"Lost: the crew ran out of supplies {(starve - self.launch_et) / DAY:.0f} days in"
+            elif now >= arrives:
                 self.status = COMPLETE
                 self.ended_et = out.et
                 self.end_note = out.describe()
         return self.status != old
+
+    def starve_et(self):
+        """When the crew on board run out of food or water (None if never, or no design known)."""
+        if self.design is None or self.design.crew <= 0:
+            return None
+        days = self.design.supply_days()
+        return None if math.isinf(days) else self.launch_et + days * DAY
 
     def can_declare_complete(self, now):
         """In a stable orbit, with no burns still to come and a full lap since the last one."""

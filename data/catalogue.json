@@ -5,8 +5,8 @@
     "relaunch: a stage that can take off again from a surface it landed on."
   ],
   "consumption": {
-    "food_kg_per_crew_day": 1.8,
-    "water_kg_per_crew_day": 3.0
+    "food_kg_per_crew_day": 0.18,
+    "water_kg_per_crew_day": 0.3
   },
   "fuel_cost_musd_per_tonne": 0.005,
   "surface_ascent_dv_km_s": {"Moon": 1.9, "Mercury": 3.0, "Mars": 4.1, "Venus": 10.0},
@@ -58,7 +58,7 @@
      "description": "Long-stay home for four."},
     {"id": "supplies",  "name": "Supply pod",              "kind": "supplies", "mass_kg": 600,   "power_kw": 0.0,
      "food_kg": 200, "water_kg": 300, "cost_musd": 2, "tier": 0,
-     "description": "200 kg food and 300 kg water (about 2 weeks for 2 crew)."},
+     "description": "200 kg food and 300 kg water (about 16 months for 2 crew)."},
     {"id": "supplies_l","name": "Large supply crate",      "kind": "supplies", "mass_kg": 5500,  "power_kw": 0.0,
      "food_kg": 2000, "water_kg": 3000, "cost_musd": 15, "tier": 1,
      "description": "2 t food and 3 t water."},
@@ -72,7 +72,7 @@
      "water_recycling": 0.8, "cost_musd": 30, "tier": 1,
      "description": "Recovers 80% of the water crew use."},
     {"id": "farm",      "name": "Greenhouse farm",         "kind": "farm",     "mass_kg": 4000,  "power_kw": -5.0,
-     "food_kg_per_day": 1.8, "cost_musd": 60, "tier": 2,
+     "food_kg_per_day": 0.18, "cost_musd": 60, "tier": 2,
      "description": "Grows enough food for one crew member."},
     {"id": "science",   "name": "Science kit",             "kind": "science",  "mass_kg": 500,   "power_kw": -0.5,
      "cost_musd": 10, "tier": 0,

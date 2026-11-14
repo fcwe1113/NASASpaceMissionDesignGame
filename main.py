@@ -14,6 +14,8 @@ Mouse controls inside the 3D view:
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from game import catalogue
+from game.base import sites_at
 from game.mission import ACTIVE, COMPLETE, LOST, PENDING, MissionControl
 from physics import ephemeris
 
@@ -60,6 +62,7 @@ class MissionsPanel(ttk.LabelFrame):
         (PENDING, "Pending", [("Name", 110), ("Target", 70), ("Launch", 90)]),
         (ACTIVE, "Ongoing", [("Name", 110), ("Orbiting", 70), ("Plan ends with", 150)]),
         ("done", "Previous", [("Name", 110), ("Ended", 90), ("Result", 150)]),
+        ("bases", "Bases", [("What", 120), ("Details", 230)]),
     ]
 
     def __init__(self, parent, page):
@@ -75,9 +78,11 @@ class MissionsPanel(ttk.LabelFrame):
             for col, width in cols:
                 tree.heading(col, text=col)
                 tree.column(col, width=width, anchor="w")
-            tree.bind("<Double-1>", lambda e: self._open())
+            if key != "bases":
+                tree.bind("<Double-1>", lambda e: self._open())
             self.notebook.add(tree, text=title)
             self.trees[key] = tree
+        self.trees["bases"].tag_configure("danger", foreground="#c33")
         row = ttk.Frame(self)
         row.pack(fill="x", pady=(6, 0))
         ttk.Button(row, text="New mission…", command=lambda: page.open_planner()).pack(side="left")
@@ -86,7 +91,10 @@ class MissionsPanel(ttk.LabelFrame):
 
     def _selected(self):
         """(mission, craft name or None) for the selected row. Craft rows are 'mission/craft'."""
-        tree = self.trees[self.TABS[self.notebook.index("current")][0]]
+        key = self.TABS[self.notebook.index("current")][0]
+        if key == "bases":
+            return None, None
+        tree = self.trees[key]
         sel = tree.selection()
         if not sel:
             return None, None
@@ -120,7 +128,10 @@ class MissionsPanel(ttk.LabelFrame):
 
         groups = {PENDING: control.by_status(PENDING), ACTIVE: control.by_status(ACTIVE),
                   "done": control.by_status(COMPLETE, LOST)}
+        self._refresh_bases(sites_at(control, now), now)
         for key, tree in self.trees.items():
+            if key == "bases":
+                continue
             selected = tree.selection()
             open_rows = {iid for iid in tree.get_children() if tree.item(iid, "open")}
             tree.delete(*tree.get_children())
@@ -139,13 +150,70 @@ class MissionsPanel(ttk.LabelFrame):
                 tree.selection_set(keep)
 
 
+    def _refresh_bases(self, sites, now):
+        tree = self.trees["bases"]
+        opened = {iid for iid in self._all_rows(tree) if tree.item(iid, "open")}
+        selected = tree.selection()
+        tree.delete(*tree.get_children())
+        cat = catalogue.default()
+        if not sites:
+            tree.insert("", "end", values=("No bases yet", "Land or put a craft in orbit to start one"))
+        for s in sites:
+            fd, wd = s.days_left()
+            soonest = min(fd, wd)
+            summary = f"{s.crew} crew"
+            if s.crew:
+                summary += f" · supplies {soonest:,.0f} d" if soonest != float("inf") else " · supplies never run out"
+            summary += f" · {s.power_kw:+.1f} kW"
+            danger = s.deaths > 0 or s.power_kw < 0 or (s.crew and soonest < 10)
+            site = f"site:{s.name}"
+            tree.insert("", "end", iid=site, values=(s.name, summary), open=site in opened,
+                        tags=("danger",) if danger else ())
+            crew = f"{s.crew} alive, {s.habitat_places} habitat place(s)" + (f", {s.deaths} died" if s.deaths else "")
+            tree.insert(site, "end", values=("Crew", crew), tags=("danger",) if s.deaths else ())
+            for label, kg, days in (("Food", s.food, fd), ("Water", s.water, wd)):
+                text = f"{kg:,.0f} kg"
+                if s.crew and days != float("inf"):
+                    text += f" · {days:,.0f} days left, runs out {short_date(now + days * 86_400)}"
+                elif s.crew:
+                    text += " · not running down"
+                tree.insert(site, "end", values=(label, text),
+                            tags=("danger",) if s.crew and days < 10 else ())
+            tree.insert(site, "end", values=("Power", f"{s.power_kw:+.1f} kW"),
+                        tags=("danger",) if s.power_kw < 0 else ())
+            stages = sum(s.stages.values())
+            tree.insert(site, "end", values=("Fuel", f"{s.fuel:,.0f} kg in {stages} stage(s)"))
+            mods = f"{site}/modules"
+            tree.insert(site, "end", iid=mods, values=("Hardware", f"{sum(s.modules.values())} modules, "
+                                                                   f"{stages} stage(s)"),
+                        open=mods in opened)
+            for mid, n in s.modules.items():
+                tree.insert(mods, "end", values=(cat.modules[mid].name, f"x{n}"))
+            for sid, n in s.stages.items():
+                tree.insert(mods, "end", values=(cat.stages[sid].name, f"x{n} (landed)"))
+            log = f"{site}/log"
+            tree.insert(site, "end", iid=log, values=("Log", f"{len(s.log)} entries"), open=log in opened)
+            for e in s.log:
+                tree.insert(log, "end", values=(short_date(e.et), e.text), tags=("danger",) if e.deaths else ())
+        keep = [x for x in selected if tree.exists(x)]
+        if keep:
+            tree.selection_set(keep)
+
+    @staticmethod
+    def _all_rows(tree, parent=""):
+        for iid in tree.get_children(parent):
+            yield iid
+            yield from MissionsPanel._all_rows(tree, iid)
+
+
 class MainPage(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent, padding=6)
         self.view = None
         self.control = MissionControl()
         self.planner = None
-        self._drawn = {}           # mission name -> (trajectory, status) currently drawn
+        self._drawn = {}           # path key -> (trajectory, status) currently drawn
+        self._deaths_seen = {}     # site name -> deaths already reported in the news
 
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
@@ -234,10 +302,22 @@ class MainPage(ttk.Frame):
         self.pause_btn.config(text="Resume" if v.paused else "Pause")   # the planner pauses too
 
         for m in self.control.update(v.sim_et):
-            self.news.config(text=f"{m.name}: launched" if m.status == ACTIVE else f"{m.name}: {m.end_note}")
+            lost = m.status == LOST or any(f.status == LOST for f in m.flights)
+            self.news.config(text=f"{m.name}: launched" if m.status == ACTIVE and not lost else f"{m.name}: {m.end_note}",
+                             foreground="#c33" if lost else "#2a7")
+        self._report_deaths(v.sim_et)
         self._sync_paths()
         self.missions.refresh(self.control, v.sim_et)
         self.after(TABLE_MS, self._refresh_tables)
+
+    def _report_deaths(self, now):
+        """Post news when crew die at a base (deaths are replayed, so compare with what we've shown)."""
+        for s in sites_at(self.control, now):
+            seen = self._deaths_seen.get(s.name, 0)
+            if s.deaths > seen:
+                last = [e for e in s.log if e.deaths][-1]
+                self.news.config(text=f"{s.name}: {last.text}", foreground="#c33")
+                self._deaths_seen[s.name] = s.deaths
 
     # ---------- Missions ----------
     def control_by_name(self, name):

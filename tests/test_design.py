@@ -7,6 +7,7 @@ from game import catalogue
 from game.design import BAD, OK, WARN, CraftDesign, assess, distance_au, starter_design
 
 CAT = catalogue.default()
+FOOD, WATER = CAT.food_per_crew_day, CAT.water_per_crew_day      # kg per crew member per day
 
 
 def by_name(indicators):
@@ -46,12 +47,12 @@ def test_masses_and_physics_craft():
 
 def test_supply_days():
     d = starter_design()                      # 2 crew, 200 kg food, 300 kg water
-    assert d.supply_days() == pytest.approx(min(200 / (2 * 1.8), 300 / (2 * 3.0)))
+    assert d.supply_days() == pytest.approx(min(200 / (2 * FOOD), 300 / (2 * WATER)))
     with_recycler = replace(d, modules={**d.modules, "recycler": 1})
-    assert with_recycler.supply_days() == pytest.approx(200 / (2 * 1.8))     # now food runs out first
+    assert with_recycler.supply_days() == pytest.approx(200 / (2 * FOOD))     # now food runs out first
     # A farm feeds one crew member forever; the water (80% recycled) then sets the limit
     farm = replace(d, crew=1, modules={**d.modules, "farm": 1, "recycler": 1})
-    assert farm.supply_days() == pytest.approx(300 / (1 * 3.0 * 0.2))
+    assert farm.supply_days() == pytest.approx(300 / (1 * WATER * 0.2))
     assert replace(farm, modules={**farm.modules, "supplies": 0}).supply_days() == 0    # no water at all
 
 
