@@ -97,7 +97,7 @@ def test_goals_from_specs():
     assert g == BaseGoal("Mars", crew=4, supply_days=365)
     assert "4 crew" in g.title and "365 days" in g.title
     with pytest.raises(ValueError, match="Unknown goal"):
-        goal_from_spec({"type": "terraform"})
+        goal_from_spec({"type": "conquer"})
 
 
 def test_bundled_scenarios_load():

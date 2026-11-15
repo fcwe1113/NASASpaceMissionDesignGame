@@ -1,6 +1,10 @@
 """The bodies in the game and their sphere-of-influence (SOI) tree.
 
-Sun -> Mercury, Venus, Earth, Mars;  Earth -> Moon.
+Sun -> Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune, Pluto;  Earth -> Moon.
+
+The outer planets (and Pluto) are their system barycentres in DE440, so their GM
+is the whole system's (planet plus moons). Their moons aren't in the ephemeris
+file the game uses, so they aren't in the game.
 """
 from dataclasses import dataclass
 
@@ -34,7 +38,18 @@ BODIES = {b.name: b for b in [
     # Mars barycenter (499 isn't in de440); GM is the whole Mars system
     Body("Mars",    "4",            42_828.375816,   3_389.5, "Sun",  227_939_200.0),
     Body("Moon",    "301",           4_902.800118,   1_737.4, "Earth",    384_399.0),
+    Body("Jupiter", "5",       126_712_764.100000,  69_911.0, "Sun",   778_570_000.0),
+    Body("Saturn",  "6",        37_940_584.841800,  58_232.0, "Sun", 1_433_530_000.0),
+    Body("Uranus",  "7",         5_794_556.400000,  25_362.0, "Sun", 2_872_460_000.0),
+    Body("Neptune", "8",         6_836_527.100580,  24_622.0, "Sun", 4_495_060_000.0),
+    Body("Pluto",   "9",               975.500000,   1_188.3, "Sun", 5_906_380_000.0),
 ]}
+
+# Planets in order from the Sun (everything orbiting the Sun directly)
+PLANETS = [b.name for b in BODIES.values() if b.parent == "Sun"]
+INNER_PLANETS = ["Mercury", "Venus", "Earth", "Mars"]
+# No solid surface: "landing" means sinking into the atmosphere, and nobody survives
+GAS_GIANTS = {"Jupiter", "Saturn", "Uranus", "Neptune"}
 
 CHILDREN = {name: [b.name for b in BODIES.values() if b.parent == name] for name in BODIES}
 

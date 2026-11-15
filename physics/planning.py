@@ -162,7 +162,8 @@ def periapsis_burn(state, rp_goal):
     return Burn(state.et, prograde=float(dv))
 
 
-PARK_ALT = {"Moon": 100.0, "Mercury": 200.0, "Venus": 300.0, "Earth": 200.0, "Mars": 200.0}
+PARK_ALT = {"Moon": 100.0, "Mercury": 200.0, "Venus": 300.0, "Earth": 200.0, "Mars": 200.0,
+            "Jupiter": 20_000.0, "Saturn": 15_000.0, "Uranus": 8_000.0, "Neptune": 8_000.0, "Pluto": 100.0}
 
 
 def parent_return(origin, et_depart, tof, park_alt=None):
@@ -248,7 +249,7 @@ def capture_burn(traj, target):
     return Burn(peri.et, prograde=-capture_dv(peri))
 
 
-FLYBY_BODIES = ("Mercury", "Venus", "Earth", "Mars", "Moon")
+FLYBY_BODIES = tuple(bodies.PLANETS) + ("Moon",)
 
 
 @dataclass

@@ -160,7 +160,7 @@ def test_add_leg_rules():
 def test_leg_targets():
     assert ("Earth (back down)", "parent", "Earth") in leg_targets("Moon")
     mars = {t[2] for t in leg_targets("Mars") if t[1] == "planet"}
-    assert mars == {"Mercury", "Venus", "Earth"}
+    assert mars == {"Mercury", "Venus", "Earth", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto"}
     assert ("Moon", "moon", "Moon") in leg_targets("Earth")
     assert leg_targets("Venus")[-1][1] == "park"
 

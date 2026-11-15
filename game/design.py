@@ -8,7 +8,7 @@ and will the crew survive where it's going.
 from dataclasses import dataclass, field
 import math
 
-from physics import BODIES, Craft, LONG_BURN
+from physics import BODIES, GAS_GIANTS, Craft, LONG_BURN
 
 from . import catalogue as cat_module
 
@@ -182,6 +182,9 @@ def assess(design, flight=None, catalogue=None, food=None, water=None):
     crew_level, crew_text = OK, f"{design.crew} crew, {design.seats(c)} seats"
     if design.crew < 1 or design.crew > design.seats(c):
         crew_level = BAD
+    elif flight is not None and flight.outcome.kind == "impact" and flight.outcome.body in GAS_GIANTS:
+        crew_level = BAD
+        crew_text += f"; {flight.outcome.body} has no surface: the craft sinks into it and the crew die"
     elif flight is not None and flight.outcome.kind == "impact":
         places = design.habitat_places(c)
         if places < design.crew:

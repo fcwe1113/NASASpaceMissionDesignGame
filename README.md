@@ -6,7 +6,10 @@ This is a hackathon project developed during the [NASA Space Apps Challenge](htt
 
 - Similar to Kerbal Space Program, you can send missions that will launch from earth to other planets
 - These missions can accumulate science points to unlock better base modules and ship parts to further help your space exploration targets
-- Maybe even terraform mars along the way? (to be implemented)
+- Difficulty levels from Tutorial (put a satellite in Earth orbit) to Hard (terraform Mars), each scored out of 100
+- Terraform Mars in three stages: atmosphere factories, orbital mirrors and biosphere labs (Terraforming tab)
+- Every finished mission, lost or successful, gets a report with a score, what went wrong and how to do better
+- The whole solar system: Mercury to Neptune, plus Pluto (gas giants can be orbited, not landed on)
 
 ## How to install
 

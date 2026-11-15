@@ -1,0 +1,19 @@
+{
+  "_notes": [
+    "Mars terraforming, used by game/terraform.py. The stages happen one after another.",
+    "Each stage needs work_days of equipment time: 2190 means one atmosphere factory takes 6 years, three take 2.",
+    "Equipment only works on its own stage, at the site given by 'where'. Surface stages also need living crew at that site and power that isn't negative."
+  ],
+  "body": "Mars",
+  "stages": [
+    {"id": "atmosphere", "name": "Thicken the atmosphere", "module": "atmo_factory", "where": "surface",
+     "needs_crew": true, "work_days": 2190,
+     "done_text": "The air is thick enough to keep heat in, and Mars is warming up."},
+    {"id": "ice", "name": "Melt the polar ice", "module": "mirror", "where": "orbit",
+     "needs_crew": false, "work_days": 1460,
+     "done_text": "The ice caps are melting: Mars has rivers and lakes again."},
+    {"id": "life", "name": "Seed a biosphere", "module": "biolab", "where": "surface",
+     "needs_crew": true, "work_days": 1460,
+     "done_text": "Moss and lichen are spreading: Mars is turning green."}
+  ]
+}

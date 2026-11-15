@@ -21,6 +21,8 @@ from pathlib import Path
 import math
 import time
 
+from physics import GAS_GIANTS
+
 from . import catalogue as cat_module
 from .base import SURFACE, arrivals, site_at
 from .mission import IDLE, PENDING, PlanError
@@ -99,6 +101,7 @@ class Science:
         self.rules = rules or Rules.load()
         self.catalogue = catalogue or cat_module.default()
         self.unlocked = {}            # tech id -> sim time it was unlocked
+        self.free = set()             # tech ids a scenario unlocks from the start (they cost nothing)
         self.deployments = []         # Deployment, in time order
         self.passive = 0.0            # points earned by the daily trickle so far
         self.firsts = []              # First, in time order (from the last update)
@@ -116,7 +119,18 @@ class Science:
 
     # ---------- Points ----------
     def spent(self):
-        return sum(self.rules.tech[t].cost for t in self.unlocked)
+        return sum(self.rules.tech[t].cost for t in self.unlocked if t not in self.free)
+
+    def earned(self):
+        """Every point earned so far (firsts and the daily trickle), spent or not."""
+        return sum(f.points for f in self.firsts) + self.passive
+
+    def grant(self, tech_ids, now):
+        """Unlock techs for free (a scenario's head start)."""
+        for t in tech_ids:
+            if t in self.rules.tech:
+                self.unlocked[t] = now
+                self.free.add(t)
 
     def balance(self):
         return self.rules.start_points + sum(f.points for f in self.firsts) + self.passive - self.spent()
@@ -149,6 +163,8 @@ class Science:
         found = {}                     # (kind, body) -> et of the earliest
 
         def note(kind, body, et):
+            if kind in ("landing", "crewed", "base") and body in GAS_GIANTS:
+                return                 # sinking into a gas giant is no landing
             if et <= now and body not in ("Sun", "Earth") and self.multiplier(body) > 0:
                 key = (kind, body)
                 if key not in found or et < found[key]:

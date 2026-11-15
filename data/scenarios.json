@@ -1,34 +1,50 @@
 {
   "sandbox": {
     "title": "Sandbox",
+    "difficulty": "Sandbox",
     "description": "No goals and no limits: fly whatever you like."
+  },
+  "first_satellite": {
+    "title": "First satellite",
+    "difficulty": "Tutorial",
+    "description": "Launch a craft carrying a Science satellite into Earth orbit (Route: Earth orbit). Once it has settled (held a full lap), open the mission and press Deploy satellite.",
+    "goals": [{"type": "satellite", "body": "Earth"}],
+    "budget": 300
   },
   "first_orbit": {
     "title": "First steps",
+    "difficulty": "Tutorial",
     "description": "Put a crewed craft into a stable orbit around Earth.",
     "goals": [{"type": "orbit", "body": "Earth"}],
     "budget": 500
   },
   "moon_landing": {
     "title": "Moon landing",
-    "description": "Land two crew on the Moon and bring a crew home.",
+    "difficulty": "Easy",
+    "scoring": "efficiency",
+    "description": "Land two crew on the Moon and bring a crew home. Scored on how much of the budget is left, and whether everyone lives.",
     "goals": [{"type": "land", "body": "Moon", "crew": 2}, {"type": "return", "body": "Moon"}],
     "budget": 3000,
     "deadline": "2030-01-01"
   },
   "mars_base": {
     "title": "Mars base",
-    "description": "Keep four crew living on Mars with a year of supplies.",
+    "difficulty": "Medium",
+    "scoring": "efficiency",
+    "description": "Set up a Mars forward base: four crew living there with 12 months of supplies, all at the same time. Scored like the Moon landing.",
     "goals": [{"type": "base", "body": "Mars", "crew": 4, "supply_days": 365}],
     "budget": 20000,
     "deadline": "2040-01-01"
   },
   "terraform_mars": {
     "title": "Terraform Mars",
-    "description": "Build up a Mars base and the science to change the planet (science points are coming).",
-    "goals": [{"type": "base", "body": "Mars", "crew": 8, "supply_days": 730, "modules": {"farm": 2}},
-              {"type": "science", "points": 1000}],
+    "difficulty": "Hard",
+    "scoring": "speed",
+    "description": "Keep a crewed Mars base running and take Mars through all three terraforming stages: atmosphere factories on the surface, then orbital mirrors in Mars orbit, then biosphere labs. Each piece weighs 15-30 t, so plan big launchers. Scored on how fast you finish.",
+    "goals": [{"type": "base", "body": "Mars", "crew": 4},
+              {"type": "terraform", "body": "Mars"}],
     "budget": 60000,
-    "deadline": "2060-01-01"
+    "deadline": "2060-01-01",
+    "unlocked": ["longstay", "terraform1"]
   }
 }

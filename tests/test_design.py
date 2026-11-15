@@ -27,10 +27,10 @@ def test_catalogue_values_are_sane():
         assert s.isp_s > 0 and s.thrust_n > 0 and s.dry_kg > 0 and s.fuel_capacity_kg > 0
     for m in CAT.modules.values():
         assert m.mass_kg > 0
-        if m.kind == "solar":
+        if m.kind in ("solar", "power"):       # solar arrays and the reactor make power
             assert m.power_kw > 0
         else:
-            assert m.power_kw <= 0             # everything but solar uses power
+            assert m.power_kw <= 0             # everything else uses power
     assert any(s.relaunch for s in CAT.stages.values())
 
 

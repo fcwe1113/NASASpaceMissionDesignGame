@@ -14,15 +14,16 @@ from tkinter import ttk
 
 import numpy as np
 
-from physics import BODIES, ephemeris
+from physics import BODIES, PLANETS, ephemeris
 from physics import bodies as phys_bodies
 from physics.planning import FLYBY_BODIES, closest_approaches
 
 DAY = 86_400.0
 AU = 149_597_870.7
-FRAMES = ["Sun", "Mercury", "Venus", "Earth", "Mars", "Moon"]
+FRAMES = ["Sun"] + PLANETS + ["Moon"]
 COLOURS = {"Sun": "#ffd84a", "Mercury": "#bbbbbb", "Venus": "#ff9a2e", "Earth": "#3a8dff",
-           "Mars": "#ff4a3a", "Moon": "#dddddd"}
+           "Mars": "#ff4a3a", "Moon": "#dddddd", "Jupiter": "#d8a46a", "Saturn": "#e6cf8a",
+           "Uranus": "#8fe3e8", "Neptune": "#4f6dff", "Pluto": "#c9a98f"}
 BG, PATH, CRAFT, BURN, GRID = "#0d0d12", "#33d6ff", "#ffffff", "#ffa040", "#2a2a35"
 MAX_PX = 30_000          # X11 draws in 16-bit coordinates; drop points much further out than this
 
@@ -140,9 +141,11 @@ class SystemMap(ttk.Frame):
                         for name in FRAMES if name != "Sun"}
         # Planet orbit outlines (heliocentric), one period around launch
         self.orbits = {}
-        for name in ("Mercury", "Venus", "Earth", "Mars"):
+        for name in PLANETS:
             period = 2 * math.pi * math.sqrt(BODIES[name].a ** 3 / BODIES["Sun"].gm)
-            ets = self.t0 + np.linspace(0, period, 240)
+            # Centred on launch, and kept inside the ephemeris (one Pluto lap is 248 years)
+            ets = np.clip(self.t0 + np.linspace(-period / 2, period / 2, 240),
+                          ephemeris.COVER_MIN, ephemeris.COVER_MAX)
             self.orbits[name] = phys_bodies.heliocentric_state(name, ets)[0]
         moon_ets = self.t0 + np.linspace(0, 27.4 * DAY, 120)
         self.moon_orbit = phys_bodies.body_state("Moon", moon_ets)[0]

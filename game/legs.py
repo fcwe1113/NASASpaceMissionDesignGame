@@ -10,7 +10,7 @@ and never more than the site still has).
 from dataclasses import dataclass, replace
 import math
 
-from physics import BODIES, CHILDREN
+from physics import BODIES, CHILDREN, PLANETS
 
 from . import catalogue as cat_module
 from .base import SURFACE, arrivals, flight_supplies, site_at
@@ -91,7 +91,7 @@ def leg_targets(origin):
     b = BODIES[origin]
     out = []
     if b.parent == "Sun":
-        out += [(p, "planet", p) for p in ("Mercury", "Venus", "Earth", "Mars") if p != origin]
+        out += [(p, "planet", p) for p in PLANETS if p != origin]
         out += [(c, "moon", c) for c in CHILDREN[origin]]
     elif b.parent is not None:
         out.append((f"{b.parent} (back down)", "parent", b.parent))

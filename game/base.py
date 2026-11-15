@@ -15,6 +15,8 @@ state at any moment is deterministic and needs no saved running totals.
 from dataclasses import dataclass, field
 import math
 
+from physics import GAS_GIANTS
+
 from . import catalogue as cat_module
 from .design import distance_au
 from .mission import PENDING
@@ -159,7 +161,11 @@ def site_at(body, where, site_arrivals, et, catalogue=None):
         s.habitat_places = sum(c.modules[mid].habitat_places * n for mid, n in s.modules.items())
         s.crew += a.crew
         s.log.append(LogEntry(a.et, f"{a.source} arrived with {a.crew} crew"))
-        if where == SURFACE and s.crew > s.habitat_places:
+        if where == SURFACE and body in GAS_GIANTS and s.crew:
+            dead, s.crew = s.crew, 0
+            s.log.append(LogEntry(a.et, f"{dead} crew died: {body} has no surface, the craft sank into "
+                                        f"its atmosphere", dead))
+        elif where == SURFACE and s.crew > s.habitat_places:
             dead = s.crew - s.habitat_places
             s.crew = s.habitat_places
             s.log.append(LogEntry(a.et, f"{dead} crew died on landing: no habitat place", dead))
@@ -230,6 +236,7 @@ def sites_at(control, et, catalogue=None):
     for a in arrivals(control, catalogue):
         if a.et <= et:
             groups.setdefault((a.body, a.where), []).append(a)
-    order = {name: k for k, name in enumerate(["Mercury", "Venus", "Earth", "Moon", "Mars"])}
+    order = {name: k for k, name in enumerate(["Mercury", "Venus", "Earth", "Moon", "Mars", "Jupiter", "Saturn",
+                                                "Uranus", "Neptune", "Pluto"])}
     return [site_at(body, where, arr, et, catalogue)
             for (body, where), arr in sorted(groups.items(), key=lambda kv: (order.get(kv[0][0], 9), kv[0][1]))]

@@ -19,7 +19,8 @@ def test_sun_soi_is_infinite():
 
 
 def test_soi_tree():
-    assert bodies.CHILDREN["Sun"] == ["Mercury", "Venus", "Earth", "Mars"]
+    assert bodies.CHILDREN["Sun"] == ["Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune",
+                                      "Pluto"]
     assert bodies.CHILDREN["Earth"] == ["Moon"]
     assert bodies.path_to_root("Moon") == ["Moon", "Earth", "Sun"]
 

@@ -30,7 +30,7 @@
      "fuel_capacity_kg": 9000,  "cost_musd": 40, "relaunch": true, "tier": 1,
      "description": "Small and cheap, and can take off again from where it lands: hops crews off the Moon."},
     {"id": "methalox",  "name": "Methalox stage",          "isp_s": 360,  "thrust_n": 200000, "dry_kg": 3000,
-     "fuel_capacity_kg": 30000, "cost_musd": 60, "relaunch": true, "tier": 1,
+     "fuel_capacity_kg": 40000, "cost_musd": 60, "relaunch": true, "tier": 1,
      "description": "The workhorse: big tanks and able to relaunch. Mars landings and Moon return trips."},
     {"id": "hydrolox",  "name": "Hydrolox stage",          "isp_s": 450,  "thrust_n": 110000, "dry_kg": 4500,
      "fuel_capacity_kg": 40000, "cost_musd": 90, "relaunch": false, "tier": 2,
@@ -82,6 +82,18 @@
      "description": "Instruments for experiments (earns science points)."},
     {"id": "satellite", "name": "Science satellite",       "kind": "satellite", "mass_kg": 300,  "power_kw": 0.0,
      "cost_musd": 15, "tier": 0,
-     "description": "Carried on board, then left behind in orbit (Deploy satellite, once the craft has settled in orbit). Earns science points."}
+     "description": "Carried on board, then left behind in orbit (Deploy satellite, once the craft has settled in orbit). Earns science points."},
+    {"id": "reactor",   "name": "Fission reactor",         "kind": "power",    "mass_kg": 8000,  "power_kw": 100.0,
+     "cost_musd": 150, "tier": 2,
+     "description": "100 kW anywhere, however far from the Sun. What a terraforming base runs on."},
+    {"id": "atmo_factory", "name": "Atmosphere factory",   "kind": "terraform", "mass_kg": 30000, "power_kw": -60.0,
+     "cost_musd": 800, "tier": 3,
+     "description": "Terraforming stage 1 (Mars surface, needs crew and power): pumps greenhouse gases into the air to warm and thicken it."},
+    {"id": "mirror",    "name": "Orbital mirror",          "kind": "terraform", "mass_kg": 15000, "power_kw": 0.0,
+     "cost_musd": 500, "tier": 3,
+     "description": "Terraforming stage 2 (Mars orbit, no crew needed): focuses sunlight on the poles to melt the ice caps."},
+    {"id": "biolab",    "name": "Biosphere lab",           "kind": "terraform", "mass_kg": 20000, "power_kw": -40.0,
+     "cost_musd": 600, "tier": 3,
+     "description": "Terraforming stage 3 (Mars surface, needs crew and power): grows and spreads hardy microbes, moss and lichen."}
   ]
 }

@@ -12,8 +12,13 @@ points). There are two kinds:
 Everything is replayed from the missions, so only the final result needs
 saving: a CampaignTracker keeps the moment the scenario was won or lost.
 
-Science points are not in the game yet: CampaignState.science is whatever the
-caller passes in (0 for now) and ScienceGoal compares against it.
+CampaignState.science is the science earned so far (game/science.py), satellites
+the ones deployed, and terraform the Mars terraforming progress (game/terraform.py);
+the caller passes them in.
+
+Each scenario has a difficulty (Tutorial, Easy, Medium, Hard or Sandbox) and,
+once won, a score out of 100 (score_win): "efficiency" scenarios score how little
+of the budget was spent and how few crew died, "speed" ones how early they were won.
 
 Scenarios live in data/scenarios.json. Goals are written as specs such as
 {"type": "land", "body": "Moon", "crew": 2}; GOAL_TYPES maps "type" to a class
@@ -40,15 +45,20 @@ class CampaignState:
     sites: list                # SiteState at `now`
     spent: float               # $M on launched missions
     committed: float           # $M on scheduled launches
-    science: float = 0.0       # points earned (not in the game yet)
+    science: float = 0.0       # points earned
     catalogue: object = None
     _arrivals: list = None
+    satellites: list = field(default_factory=list)     # science.Deployment
+    terraform: object = None                            # terraform.Terraforming
 
     @classmethod
-    def build(cls, control, now, science=0.0, catalogue=None):
+    def build(cls, control, now, science=0.0, catalogue=None, satellites=(), terraform=None, sites=None):
         c = catalogue or cat_module.default()
         costs = control.costs()
-        return cls(control, now, sites_at(control, now, c), costs.spent, costs.committed, science, c)
+        if sites is None:
+            sites = sites_at(control, now, c)
+        return cls(control, now, sites, costs.spent, costs.committed, science, c,
+                   satellites=list(satellites), terraform=terraform)
 
     @property
     def arrivals(self):
@@ -210,8 +220,45 @@ class ScienceGoal(Goal):
                         min(1.0, state.science / self.points) if self.points else 1.0)
 
 
+@dataclass
+class SatelliteGoal(Goal):
+    """Leave a satellite in orbit around `body` (Deploy satellite in the planner)."""
+    body: str
+    count: int = 1
+
+    @property
+    def title(self):
+        what = "a satellite" if self.count == 1 else f"{self.count} satellites"
+        return f"Deploy {what} in orbit around {self.body}"
+
+    def progress(self, state):
+        here = sorted(d.et for d in state.satellites if d.body == self.body and d.et <= state.now)
+        if len(here) >= self.count:
+            return Progress(True, "Deployed", 1.0, here[self.count - 1])
+        return Progress(False, f"{len(here)}/{self.count}" if here else "Not yet", len(here) / self.count)
+
+
+@dataclass
+class TerraformGoal(Goal):
+    """Finish every terraforming stage (game/terraform.py)."""
+    body: str = "Mars"
+
+    @property
+    def title(self):
+        return f"Terraform {self.body} (all 3 stages)"
+
+    def progress(self, state):
+        t = state.terraform
+        if t is None:
+            return Progress(False, "Not started", 0.0)
+        if t.complete:
+            return Progress(True, "Terraformed", 1.0, t.done_et[-1])
+        stage = t.stages[t.current]
+        return Progress(False, f"Stage {t.current + 1}: {stage.name}, {t.fraction:.0%} overall", t.fraction)
+
+
 GOAL_TYPES = {"orbit": OrbitGoal, "land": LandGoal, "return": ReturnGoal, "base": BaseGoal,
-              "science": ScienceGoal}
+              "science": ScienceGoal, "satellite": SatelliteGoal, "terraform": TerraformGoal}
 
 
 def goal_from_spec(spec):
@@ -231,6 +278,9 @@ class Scenario:
     goals: list = field(default_factory=list)
     budget: float | None = None        # $M; going over (on launched missions) loses
     deadline: float | None = None      # ET; still playing at this moment loses
+    difficulty: str = "Sandbox"        # Tutorial, Easy, Medium, Hard or Sandbox
+    scoring: str = "efficiency"        # how a win is scored: "efficiency" or "speed"
+    unlocked: list = field(default_factory=list)    # tech ids unlocked from the start
 
     @property
     def sandbox(self):
@@ -242,7 +292,9 @@ class Scenario:
         deadline = spec.get("deadline")
         return cls(sid, spec["title"], spec.get("description", ""),
                    [goal_from_spec(g) for g in spec.get("goals", [])], spec.get("budget"),
-                   ephemeris.str2et(deadline) if deadline else None)
+                   ephemeris.str2et(deadline) if deadline else None,
+                   spec.get("difficulty", "Sandbox"), spec.get("scoring", "efficiency"),
+                   list(spec.get("unlocked", [])))
 
 
 def load_scenarios(path=DEFAULT_PATH):
@@ -263,12 +315,46 @@ def scenarios():
 
 
 # ---------- Checking ----------
+DIFFICULTIES = ["Tutorial", "Easy", "Medium", "Hard", "Sandbox"]
+
+
+def crew_deaths(state):
+    """Crew who died so far: at bases, and on board lost craft."""
+    at_sites = sum(s.deaths for s in state.sites)
+    on_board = sum(f.design.crew for m in state.control.missions for f in m.flights
+                   if f.status == "lost" and f.design is not None)
+    return at_sites + on_board
+
+
+def score_win(scenario, state, started_et):
+    """(score out of 100, [why]) for a scenario won at state.now."""
+    notes = []
+    if scenario.scoring == "speed" and scenario.deadline is not None:
+        span = max(scenario.deadline - started_et, 1.0)
+        left = max(0.0, min(1.0, (scenario.deadline - state.now) / span))
+        score = 40 + 60 * left
+        notes.append(f"Speed: won with {left:.0%} of the time left (+{60 * left:.0f})")
+    elif scenario.budget:
+        left = max(0.0, min(1.0, 1 - state.spent / scenario.budget))
+        score = 40 + 60 * left
+        notes.append(f"Efficiency: {left:.0%} of the budget unspent (+{60 * left:.0f})")
+    else:
+        score = 100
+    dead = crew_deaths(state)
+    if dead:
+        score -= 10 * dead
+        notes.append(f"{dead} crew died (-{10 * dead})")
+    return max(0, min(100, round(score))), notes
+
+
 @dataclass
 class Verdict:
     status: str                # PLAYING, WON or FAILED
     goals: list                # (goal, Progress) in scenario order
     reason: str = ""
     et: float | None = None    # when it was won or lost
+    score: int | None = None   # out of 100, once won
+    score_notes: list = field(default_factory=list)
 
     @property
     def met(self):
@@ -281,21 +367,28 @@ class CampaignTracker:
     def __init__(self, scenario):
         self.scenario = scenario
         self.result = None         # (status, reason, et) once decided; this is what a save keeps
+        self.started_et = None     # first check: when the scenario began (for speed scores)
+        self.score = None          # (score, notes) once won
 
     @property
     def status(self):
         return self.result[0] if self.result else PLAYING
 
-    def check(self, control, now, science=0.0, catalogue=None):
+    def check(self, control, now, science=0.0, catalogue=None, satellites=(), terraform=None, sites=None):
         """Verdict at `now`. The first check that finds every goal met (or a limit broken) decides it."""
-        state = CampaignState.build(control, now, science, catalogue)
+        if self.started_et is None:
+            self.started_et = now
+        state = CampaignState.build(control, now, science, catalogue, satellites, terraform, sites)
         goals = [(g, g.progress(state)) for g in self.scenario.goals]
         if self.result is None:
             self.result = self._decide(goals, state)
+            if self.result is not None and self.result[0] == WON:
+                self.score = score_win(self.scenario, state, self.started_et)
         if self.result is None:
             return Verdict(PLAYING, goals)
         status, reason, et = self.result
-        return Verdict(status, goals, reason, et)
+        score, notes = self.score if self.score else (None, [])
+        return Verdict(status, goals, reason, et, score, notes)
 
     def _decide(self, goals, state):
         sc = self.scenario

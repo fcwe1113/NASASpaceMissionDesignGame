@@ -5,7 +5,8 @@
     "Parts not in any tech node are always available (tier 0 parts, all launchers, the torch drive)."
   ],
   "start_points": 70,
-  "multiplier": {"Moon": 1, "Venus": 2, "Mars": 2, "Mercury": 3},
+  "multiplier": {"Moon": 1, "Venus": 2, "Mars": 2, "Mercury": 3,
+                 "Jupiter": 4, "Saturn": 5, "Uranus": 6, "Neptune": 7, "Pluto": 8},
 
   "firsts": {
     "visit":     {"points": 10, "text": "First craft to reach {body}"},
@@ -31,6 +32,10 @@
     {"id": "hydrolox",  "name": "Hydrolox engines",  "cost": 120, "needs": ["methalox"], "parts": ["hydrolox"]},
     {"id": "farming",   "name": "Farming",           "cost": 120, "needs": ["life"], "parts": ["farm"]},
     {"id": "nuclear",   "name": "Nuclear thermal",   "cost": 300, "needs": ["hydrolox"], "parts": ["nuclear"]},
-    {"id": "ion",       "name": "Ion drive",         "cost": 300, "needs": ["power"], "parts": ["ion"]}
+    {"id": "ion",       "name": "Ion drive",         "cost": 300, "needs": ["power"], "parts": ["ion"]},
+    {"id": "fission",   "name": "Nuclear power",     "cost": 120, "needs": ["power"], "parts": ["reactor"]},
+    {"id": "terraform1","name": "Atmosphere engineering", "cost": 200, "needs": ["longstay"], "parts": ["atmo_factory"]},
+    {"id": "terraform2","name": "Orbital mirrors",   "cost": 250, "needs": ["terraform1"], "parts": ["mirror"]},
+    {"id": "terraform3","name": "Biosphere seeding", "cost": 300, "needs": ["terraform2", "farming"], "parts": ["biolab"]}
   ]
 }

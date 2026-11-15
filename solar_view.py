@@ -3,17 +3,22 @@
 
 The host (see main.py) creates a SolarSystemView inside one of its native windows,
 then calls run(), which hands the main loop to Ursina and calls the host back once
-per frame so it can handle its own events. Keyboard controls are replaced
-by methods (set_focus, faster, slower, toggle_pause) the host can call.
+per frame so it can handle its own events. The host can also call set_focus,
+faster, slower, toggle_pause, view_whole_system and view_inner_planets.
 
 Mouse controls inside the view:
+    Left-click a planet (or a craft)   fly the camera to it and follow it
+    Hover a planet                     what it is and how far away
     Right-drag      orbit camera      Scroll       zoom
     Middle-drag     pan (while following a body, the view keeps moving with it;
                     press the body's camera button again to re-centre)
+Keys (click the view first): Space pause, + / - faster / slower, 0 Sun,
+1-9 the planets from Mercury out to Pluto, M Moon, F whole system, I inner
+planets, H show or hide this help.
 """
 from itertools import groupby
 
-from panda3d.core import WindowProperties, loadPrcFileData
+from panda3d.core import OmniBoundingVolume, WindowProperties, loadPrcFileData
 from ursina import *
 import spiceypy as spice
 import numpy as np
@@ -31,6 +36,13 @@ MOON_EXAG = 1.0                  # true Moon distance
 DAY = 86_400.0
 
 ET_MIN, ET_MAX = COVER_MIN, COVER_MAX   # sim clock stays inside the coverage (trails are clipped to it too)
+GAS_GIANT_NAMES = {"Jupiter", "Saturn", "Uranus", "Neptune"}
+HELP_SHORT = "Click a planet to fly there · Scroll to zoom · Right-drag to rotate · H for keys"
+HELP_LONG = ("Click a planet (or a craft) to fly there and follow it\n"
+             "Scroll: zoom      Right-drag: rotate      Middle-drag: pan\n"
+             "Space: pause      + / -: faster / slower\n"
+             "0: Sun    1-9: Mercury ... Pluto    M: Moon\n"
+             "F: whole solar system    I: inner planets    H: hide this")
 
 #           SPICE id, period (days), body colour,  orbit-line colour,       mean radius (km)
 PLANETS = {
@@ -38,6 +50,12 @@ PLANETS = {
     "Venus":   ("299", 225, color.orange,     color.orange,                6_051.8),
     "Earth":   ("399", 365, color.azure,      color.azure.tint(-0.4),      6_371.0),
     "Mars":    ("4",   687, color.red,        color.red.tint(-0.4),        3_389.5),  # barycenter (499 isn't in de440/de440s)
+    # Outer planets and Pluto: system barycentres (their moons aren't in de440s)
+    "Jupiter": ("5",  4333, color.rgb32(216, 164, 106), color.rgb32(130, 100, 64),  69_911.0),
+    "Saturn":  ("6", 10759, color.rgb32(230, 207, 138), color.rgb32(140, 125, 84),  58_232.0),
+    "Uranus":  ("7", 30687, color.rgb32(143, 227, 232), color.rgb32(86, 136, 140),  25_362.0),
+    "Neptune": ("8", 60190, color.rgb32(79, 109, 255),  color.rgb32(48, 66, 153),   24_622.0),
+    "Pluto":   ("9", 90560, color.rgb32(201, 169, 143), color.rgb32(120, 101, 86),   1_188.3),
 }
 SUN_RADIUS_KM = 695_700.0
 MOON_RADIUS_KM = 1_737.4
@@ -64,6 +82,29 @@ def diameter(radius_km):
     return 2 * radius_km / KM_PER_UNIT
 
 
+def no_depth(entity):
+    """Draw lines first and without the depth buffer.
+
+    (Line meshes also use render_points_in_3d=False: by default Ursina makes line
+    thickness shrink with distance, so zoomed out every orbit faded away to nothing.)
+
+    The scene spans ~50 AU at true scale, so depth values far away are too coarse
+    to tell a line from the empty background: long orbit lines broke up into
+    dashes and flickered. Lines don't hide anything, so they skip the depth
+    test; planets are drawn after them and still cover them.
+    """
+    entity.setDepthTest(False)
+    entity.setDepthWrite(False)
+    entity.setBin("background", 10)
+    # Fixed on-screen thickness, set on the entity so it applies whatever the mesh says
+    entity.setRenderModePerspective(False)
+    entity.setRenderModeThickness(entity.model.getRenderModeThickness() or 1.5)
+    # Never skipped by frustum culling: zoomed far out, Panda wrongly culled whole orbits
+    # (Jupiter's, Saturn's...) that were plainly on screen. Lines are cheap to draw anyway.
+    entity.node().setBounds(OmniBoundingVolume())
+    entity.node().setFinal(True)
+
+
 class Trail:
     """Orbit line covering half a lap behind to half a lap ahead of the current time.
 
@@ -80,7 +121,8 @@ class Trail:
         self.n = n_points
         self.entity = Entity(parent=parent, color=col,
                              model=Mesh(vertices=self._points(et), mode="line",
-                                        thickness=thickness))
+                                        thickness=thickness, render_points_in_3d=False))
+        no_depth(self.entity)
         self.built_at = et
 
     def _points(self, et):
@@ -112,14 +154,21 @@ def project(cam_space):
 
 
 class Marker:
-    def __init__(self, body, name, col, radius_km):
+    def __init__(self, body, name, col, radius_km, on_click=None, info=None):
         self.body = body
+        self.name = name
         self.radius = radius_km / KM_PER_UNIT
         self.ring = Entity(parent=camera.ui, color=col,
                            model=Circle(48, mode="line", thickness=1.5))
         self.label = Text(name, parent=camera.ui, color=col, origin=(-0.5, 0), scale=0.8)
         self.screen_pos = Vec2(0, 0)
         self.ring_r = MARKER_MIN_RADIUS
+        self.info = info                     # () -> hover text, or None
+        self.hit = None
+        if on_click is not None:
+            # An invisible button a bit bigger than the ring, so small markers are easy to hit
+            self.hit = Entity(parent=self.ring, model="quad", scale=1.6, color=color.clear, collider="box")
+            self.hit.on_click = on_click
 
     def update(self):
         rel = camera.getRelativePoint(self.body, Vec3(0, 0, 0))   # z = depth in front of camera (y-up)
@@ -132,7 +181,8 @@ class Marker:
         body_r = abs(edge.x - self.screen_pos.x)
         self.ring_r = max(MARKER_MIN_RADIUS, body_r * MARKER_PADDING)
         self.ring.position = self.screen_pos
-        self.ring.scale = self.ring_r * 2                         # Circle mesh has radius 0.5
+        # Circle mesh has radius 0.5. Only x and y: a flat z scale makes the click box too thin to hit
+        self.ring.scale = Vec3(self.ring_r * 2, self.ring_r * 2, 1)
         self.label.position = (self.screen_pos.x + self.ring_r + 0.006, self.screen_pos.y)
 
     def hide(self):
@@ -212,11 +262,15 @@ class FlightPath:
             segs = list(segs)
             visit = Visit(view, body, segs, show_ghost=k > 0 and body != "Sun")
             self.visits.append(visit)
-            self.lines += [Entity(parent=visit.anchor, color=col,
-                                  model=Mesh(vertices=self._points(seg), mode="line", thickness=thickness))
-                           for seg in segs]
+            for seg in segs:
+                line = Entity(parent=visit.anchor, color=col,
+                              model=Mesh(vertices=self._points(seg), mode="line", thickness=thickness,
+                                         render_points_in_3d=False))
+                no_depth(line)
+                self.lines.append(line)
         self.craft = Entity(model="sphere", color=col, scale=0.05, enabled=False)
-        self.marker = Marker(self.craft, label, col, 0.0)
+        self.marker = Marker(self.craft, label, col, 0.0, on_click=lambda: view._focus_on(self.craft),
+                             info=lambda: f"{label}\nClick to follow this craft")
 
     @property
     def markers(self):
@@ -300,21 +354,34 @@ class SolarSystemView:
         # Anchored to the view's left edge; Ursina keeps UI x in proportion on resize
         self.date_text = Text(position=window.top_left + Vec2(0.02, -0.03), scale=1.2)
 
-        self.markers = {"Sun": Marker(self.sun, "Sun", color.yellow, SUN_RADIUS_KM)}
+        def body_marker(entity, name, col, radius_km):
+            return Marker(entity, name, col, radius_km, on_click=lambda: self.set_focus(name),
+                          info=lambda: self._body_info(name))
+        self.markers = {"Sun": body_marker(self.sun, "Sun", color.yellow, SUN_RADIUS_KM)}
         for name, (_sid, _p, col, _lc, radius_km) in PLANETS.items():
-            self.markers[name] = Marker(self.bodies[name], name, col, radius_km)
-        self.markers["Moon"] = Marker(self.moon, "Moon", color.white, MOON_RADIUS_KM)
+            self.markers[name] = body_marker(self.bodies[name], name, col, radius_km)
+        self.markers["Moon"] = body_marker(self.moon, "Moon", color.white, MOON_RADIUS_KM)
+
+        # Hover info box and the help line (H toggles it)
+        self.tooltip = Text("", parent=camera.ui, scale=0.75, origin=(-0.5, 0.5), background=True, enabled=False)
+        self.help = Text(HELP_SHORT, parent=camera.ui, scale=0.7, origin=(-0.5, -0.5), color=color.light_gray,
+                         position=window.bottom_left + Vec2(0.015, 0.015))
+        self._keys = Entity()
+        self._keys.input = self._on_key
 
         # At true scale the scene spans ~400,000 units but planets are only a few units
         # wide, so the camera needs a very long view distance and a small near plane.
+        # The near and far planes follow the zoom every frame (see _fit_clip_planes)
         camera.clip_plane_near = 0.05
-        camera.clip_plane_far = 2_000_000
+        camera.clip_plane_far = 30_000_000
 
         # EditorCamera is a pivot entity; the camera orbits around its position.
         # Move the pivot and the view centre moves with it. Its zoom is proportional
         # to distance, so scrolling works from whole-system view down to a single planet.
         # Middle-drag pans at any time; while following a body the pan is kept as an offset from it
-        self.cam = EditorCamera(rotation=(30, 0, 0), pan_speed=self.PAN_SPEED)
+        # ignore_scroll_on_ui=False: the planet markers are clickable UI, and scrolling with the
+        # mouse over one must still zoom
+        self.cam = EditorCamera(rotation=(30, 0, 0), pan_speed=self.PAN_SPEED, ignore_scroll_on_ui=False)
         camera.z = -700_000            # start with the whole inner solar system in view
         self.cam.target_z = camera.z   # EditorCamera eases camera.z toward target_z, so set both
 
@@ -460,13 +527,111 @@ class SolarSystemView:
                                f"{self.days_per_second:+.1f} days/s{'  (paused)' if self.paused else ''}")
 
     def _update_markers(self):
+        self._limit_zoom()
+        self._fit_clip_planes()
         for m in self.markers.values():
             m.update()
         for path in self.paths.values():
             for m in path.markers:
                 m.update()
-        # From far away the Moon's marker sits on top of Earth's; hide it until they separate
-        e, mo = self.markers["Earth"], self.markers["Moon"]
-        if mo.ring.enabled and e.ring.enabled and \
-                distance_2d(e.screen_pos, mo.screen_pos) < e.ring_r + mo.ring_r:
-            mo.hide()
+        # Zoomed out, markers pile up (Moon on Earth, the inner planets on the Sun). Keep the
+        # first one of each pile (the Sun, then the planets in order) and hide the rest.
+        shown = []
+        for m in self.markers.values():
+            if not m.ring.enabled:
+                continue
+            if any(distance_2d(m.screen_pos, s.screen_pos) < (m.ring_r + s.ring_r) * 0.9 for s in shown):
+                m.hide()
+            else:
+                shown.append(m)
+        self._update_tooltip()
+
+    # ---------- Camera range ----------
+    # Past ~16.7 million units (2**24) from the camera nothing 3D gets drawn at all (single
+    # precision runs out), so the camera never goes further than this. Zooming out beyond it
+    # widens the field of view instead, which is enough to take in Pluto's whole orbit.
+    MAX_DISTANCE = 14_000_000
+    BASE_FOV, MAX_FOV = 40, 110
+
+    def _limit_zoom(self):
+        """Keep scrolling between just outside the followed body and the whole system."""
+        tz = self.cam.target_z
+        if tz < -self.MAX_DISTANCE:                                  # zooming out past the limit
+            camera.fov = min(self.MAX_FOV, camera.fov * tz / -self.MAX_DISTANCE)
+            tz = -self.MAX_DISTANCE
+        elif camera.fov > self.BASE_FOV and tz > -self.MAX_DISTANCE:  # zooming back in: narrow first
+            camera.fov = max(self.BASE_FOV, camera.fov * tz / -self.MAX_DISTANCE)
+            tz = -self.MAX_DISTANCE
+        body = self.focus_target
+        r = max(body.scale_x / 2, 0.05) if body is not None else 0.05
+        self.cam.target_z = min(tz, -r * 3)
+
+    def _fit_clip_planes(self):
+        """Near/far planes around what's in view, so the depth buffer has precision where it's needed."""
+        dist = abs(camera.z)
+        camera.clip_plane_near = max(0.01, dist * 0.0005)
+        camera.clip_plane_far = dist + 2 * self.MAX_DISTANCE
+
+    def _fit_distance(self, radius):
+        """How far back the camera must sit to see a circle of `radius` units around the centre
+        (with the normal field of view; _limit_zoom turns anything past MAX_DISTANCE into a wider one)."""
+        half_fov = math.radians(self.BASE_FOV / 2)              # camera.fov is horizontal
+        return radius / math.tan(half_fov) * max(1.0, window.aspect_ratio) * 1.1
+
+    def view_whole_system(self):
+        far = max(self.bodies[n].position.length() for n in PLANETS)
+        self.set_focus("Sun")
+        self.cam.target_z = -self._fit_distance(far)
+
+    def view_inner_planets(self):
+        self.set_focus("Sun")
+        camera.fov = self.BASE_FOV
+        self.cam.target_z = -self._fit_distance(self.bodies["Mars"].position.length())
+
+    # ---------- Hover and keys ----------
+    def _body_info(self, name):
+        pos = (self.sun if name == "Sun" else self.moon if name == "Moon" else self.bodies[name]).position
+        lines = [name]
+        if name != "Sun":
+            lines.append(f"{pos.length() * KM_PER_UNIT / AU_KM:.2f} AU from the Sun")
+        if name != "Earth":
+            km = (pos - self.bodies["Earth"].position).length() * KM_PER_UNIT
+            lines.append(f"{km / 1e6:,.1f} million km from Earth" if km > 1e6 else f"{km:,.0f} km from Earth")
+        if name in BODIES and BODIES[name].parent is not None and name in GAS_GIANT_NAMES:
+            lines.append("Gas giant: orbit it, no landing")
+        lines.append("Click to fly here")
+        return "\n".join(lines)
+
+    def _update_tooltip(self):
+        hovered = mouse.hovered_entity
+        marker = next((m for m in list(self.markers.values()) +
+                       [p.marker for p in self.paths.values()] if m.hit is not None and m.hit is hovered and m.info),
+                      None)
+        if marker is None or not marker.ring.enabled:
+            self.tooltip.enabled = False
+            return
+        self.tooltip.text = marker.info()
+        self.tooltip.position = (marker.screen_pos.x + marker.ring_r + 0.01, marker.screen_pos.y - 0.02)
+        self.tooltip.enabled = True
+
+    def _on_key(self, key):
+        planets = list(PLANETS)
+        if key == "space":
+            self.toggle_pause()
+        elif key in ("+", "=", "+ hold", "= hold"):
+            self.faster()
+        elif key in ("-", "- hold"):
+            self.slower()
+        elif key == "0":
+            self.set_focus("Sun")
+        elif key.isdigit() and 1 <= int(key) <= len(planets):
+            self.set_focus(planets[int(key) - 1])
+        elif key == "m":
+            self.set_focus("Moon")
+        elif key == "f":
+            self.view_whole_system()
+        elif key == "i":
+            self.view_inner_planets()
+        elif key == "h":
+            self._help_long = not getattr(self, "_help_long", False)
+            self.help.text = HELP_LONG if self._help_long else HELP_SHORT

@@ -21,14 +21,14 @@ from game import catalogue as catalogue_module
 from game.design import BAD, INFO, OK, WARN, CraftDesign, assess, starter_design
 from game.legs import apply_leg_start, leg_targets, next_leg_name, next_leg_start
 from game.mission import ACTIVE, IDLE, PENDING, Flight, Mission, PlanError, park_alt
-from physics import BODIES, Burn, LONG_BURN, ephemeris, fly, porkchop
+from physics import BODIES, GAS_GIANTS, PLANETS, Burn, LONG_BURN, ephemeris, fly, porkchop
 from physics import planning
 from physics.assist import assist_search
 from physics.planning import PlanningError
 from system_map import SystemMap
 
 DAY = 86_400.0
-TARGETS = ["Earth orbit", "Moon", "Mercury", "Venus", "Mars"]
+TARGETS = ["Earth orbit", "Moon"] + [p for p in PLANETS if p != "Earth"]
 # Flight-time range (days) searched for each planet
 TOF_RANGE = {"Mercury": (60, 200), "Venus": (70, 250), "Mars": (120, 450)}
 ASSIST_LEG2_RANGE = (80, 500)      # days from the flyby planet on to the target
@@ -262,8 +262,13 @@ class MissionPlanner(tk.Toplevel):
         self.assist_grid = None        # gravity-assist search behind the chart, if "Via" is set
         self._preview_keys = set()
         self.title(f"Mission: {mission.name}" if mission else "New mission")
-        self.geometry("1400x880")
-        self.minsize(1370, 820)
+        # Fit on the screen above the taskbar: the action buttons are along the bottom edge
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(1400, sw - 20), min(880, sh - 110)
+        self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - 80 - h) // 2)}")
+        self.minsize(min(1370, w), min(820, h))
+        if sw < 1450 or sh < 960:
+            self.state("zoomed")          # small or scaled-up screen (e.g. 1080p at 150%): use all of it
 
         # Pause the clock while planning; restore it on close
         self._was_paused = self.view.paused
@@ -277,18 +282,22 @@ class MissionPlanner(tk.Toplevel):
         right = ttk.Frame(self, padding=8)
         right.grid(row=0, column=1, sticky="nsew")
         self._build_mission(left)
+        # Packed before the tabs (at the bottom) so it keeps its space on small screens
+        self._build_health(left)
         left_tabs = ttk.Notebook(left)
         left_tabs.pack(fill="both", expand=True, pady=(8, 0))
+        self.left_tabs = left_tabs          # the Guide switches between Build craft and Route
         build_tab = ttk.Frame(left_tabs, padding=6)
         left_tabs.add(build_tab, text="Build craft")
         route_tab = ttk.Frame(left_tabs, padding=6)
         left_tabs.add(route_tab, text="Route")
+        self.build_tab, self.route_tab = build_tab, route_tab
         self._build_craft(build_tab)
         self._build_launch(route_tab)
-        self._build_health(left)
         self._build_summary(right)
         tabs = ttk.Notebook(right)
         tabs.pack(fill="both", expand=True, pady=(6, 0))
+        self.plan_tabs = tabs
         plan_tab = ttk.Frame(tabs, padding=4)
         tabs.add(plan_tab, text="Burns & events")
         self._build_burns(plan_tab)
@@ -392,7 +401,8 @@ class MissionPlanner(tk.Toplevel):
 
     def _build_health(self, parent):
         box = ttk.LabelFrame(parent, text="Craft check", padding=6)
-        box.pack(fill="x", pady=(8, 0))
+        self.health_box = box
+        box.pack(side="bottom", fill="x", pady=(8, 0))
         self.health_rows = []
         for _ in range(7):
             row = ttk.Frame(box)
@@ -423,7 +433,7 @@ class MissionPlanner(tk.Toplevel):
         c = self.craft
         if c.leg_of is None:
             return [("Earth orbit", "park", "Earth"), ("Moon", "moon", "Moon"),
-                    *[(p, "planet", p) for p in ("Mercury", "Venus", "Mars")]]
+                    *[(p, "planet", p) for p in PLANETS if p != "Earth"]]
         return leg_targets(c.origin)
 
     def _route(self):
@@ -483,8 +493,7 @@ class MissionPlanner(tk.Toplevel):
             self.via = tk.StringVar(value="None")
             via_ok = not fixed
             via_box = ttk.Combobox(via_row, textvariable=self.via, state="readonly" if via_ok else "disabled",
-                                   width=12, values=["None"] + [p for p in ("Mercury", "Venus", "Earth", "Mars")
-                                                                if p not in (target, origin)])
+                                   width=12, values=["None"] + [p for p in PLANETS if p not in (target, origin)])
             via_box.pack(side="left")
             via_box.bind("<<ComboboxSelected>>", lambda e: self._via_changed())
             if not via_ok:
@@ -1155,7 +1164,7 @@ class MissionPlanner(tk.Toplevel):
 
     def _body_choices(self):
         target = self._target_body()
-        others = [b for b in ["Moon", "Mercury", "Venus", "Mars", "Earth"] if b != target]
+        others = [b for b in ["Moon"] + PLANETS if b != target]
         return [target] + others if target in BODIES else others
 
     @_guard
@@ -1205,7 +1214,7 @@ class MissionPlanner(tk.Toplevel):
         """Dialog: fly past `via` so it bends the path on to a target. The map pre-fills via/flyby."""
         self._need_draft()
         d = self.draft
-        planets = ["Mercury", "Venus", "Earth", "Mars"]
+        planets = list(PLANETS)
         if via is None:
             # Default to the first planet the plan already passes, if any
             passes = [a for a in planning.closest_approaches(d.trajectory) if a.body in planets]
@@ -1241,7 +1250,12 @@ class MissionPlanner(tk.Toplevel):
 
     def _land_checkbox(self, box, text="Land on arrival (instead of passing by)"):
         self.land_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(box, text=text, variable=self.land_var).pack(anchor="w")
+        if self._target_body() in GAS_GIANTS:
+            ttk.Label(box, foreground="#777", text=f"{self._target_body()} is a gas giant: no surface to land on, "
+                                                    "but you can orbit it").pack(anchor="w")
+            return
+        self.land_check = ttk.Checkbutton(box, text=text, variable=self.land_var)
+        self.land_check.pack(anchor="w")
 
     @_guard
     def _land(self):
@@ -1271,6 +1285,8 @@ class MissionPlanner(tk.Toplevel):
                 "are replaced. Landing is free in this game, taking off again isn't.").ask()
         if res is None:
             return
+        if res["body"] in GAS_GIANTS:
+            raise PlanError(f"{res['body']} is a gas giant: there's no surface to land on (you can orbit it)")
         t = d.launch_et + parse_float(res["t"], "Burn time") * DAY
         self._check_not_past(t)
         arrive_text = res["arrive"].strip()

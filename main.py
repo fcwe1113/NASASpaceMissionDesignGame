@@ -17,14 +17,16 @@ from tkinter import messagebox, ttk
 
 from game import catalogue
 from game.base import sites_at
-from game.campaign import FAILED, PLAYING, WON, CampaignTracker, scenarios
+from game.campaign import DIFFICULTIES, FAILED, PLAYING, WON, CampaignTracker, scenarios
 from game.mission import ACTIVE, COMPLETE, IDLE, LOST, PENDING, MissionControl
 from game.science import Science
+from game.terraform import Terraforming
 from physics import ephemeris
 
 TABLE_MS = 250        # how often the side tables refresh
 MIN_SPEED = 0.5       # days/s; the Slower button is disabled below this
-BODIES = ["Sun", "Mercury", "Venus", "Earth", "Mars", "Moon"]
+BODIES = ["Sun", "Mercury", "Venus", "Earth", "Mars", "Moon", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto"]
+CAMERA_BUTTONS = 6    # the first few bodies get a button; the rest are in the "Outer" dropdown
 
 
 class StartPage(ttk.Frame):
@@ -33,19 +35,30 @@ class StartPage(ttk.Frame):
         ttk.Label(self, text="Inner Solar System", font=("TkDefaultFont", 28, "bold")).pack(pady=(80, 10))
         ttk.Label(self, text="Real planet positions from JPL's DE440 ephemeris").pack(pady=(0, 30))
         self.scenarios = scenarios()
-        titles = [s.title for s in self.scenarios.values()]
-        self.choice = tk.StringVar(value=titles[0])
+        levels = [d for d in DIFFICULTIES if any(s.difficulty == d for s in self.scenarios.values())]
+        self.level = tk.StringVar(value=levels[0])
+        ttk.Label(self, text="Difficulty").pack()
+        level_box = ttk.Combobox(self, textvariable=self.level, values=levels, state="readonly", width=30)
+        level_box.pack(pady=(2, 8))
+        self.choice = tk.StringVar()
         ttk.Label(self, text="Scenario").pack()
-        box = ttk.Combobox(self, textvariable=self.choice, values=titles, state="readonly", width=30)
-        box.pack(pady=(2, 4))
+        self.box = ttk.Combobox(self, textvariable=self.choice, state="readonly", width=30)
+        self.box.pack(pady=(2, 4))
         self.about = ttk.Label(self, foreground="#555", wraplength=420, justify="center")
         self.about.pack(pady=(0, 20))
-        box.bind("<<ComboboxSelected>>", lambda e: self._describe())
-        self._describe()
+        level_box.bind("<<ComboboxSelected>>", lambda e: self._level_changed())
+        self.box.bind("<<ComboboxSelected>>", lambda e: self._describe())
+        self._level_changed()
         ttk.Button(self, text="Start", command=lambda: on_start(self.scenario()), width=20).pack(ipady=8)
 
     def scenario(self):
         return next(s for s in self.scenarios.values() if s.title == self.choice.get())
+
+    def _level_changed(self):
+        titles = [s.title for s in self.scenarios.values() if s.difficulty == self.level.get()]
+        self.box.config(values=titles)
+        self.choice.set(titles[0])
+        self._describe()
 
     def _describe(self):
         s = self.scenario()
@@ -54,6 +67,8 @@ class StartPage(ttk.Frame):
             limits.append(f"Budget {money(s.budget)}")
         if s.deadline is not None:
             limits.append(f"by {short_date(s.deadline)}")
+        if s.goals:
+            limits.append("scored on speed" if s.scoring == "speed" else "scored on efficiency")
         self.about.config(text=s.description + ("\n" + ", ".join(limits) if limits else ""))
 
 
@@ -93,8 +108,9 @@ class MissionsPanel(ttk.LabelFrame):
         ("done", "Previous", [("Name", 110), ("Ended", 90), ("Result", 150), ("Cost", 65)]),
         ("bases", "Bases", [("What", 120), ("Details", 230)]),
         ("goals", "Goals", [("Goal", 200), ("Progress", 150)]),
+        ("terraform", "Terraforming", [("Stage", 150), ("Progress", 200)]),
     ]
-    INFO_TABS = ("bases", "goals")       # not mission lists
+    INFO_TABS = ("bases", "goals", "terraform")       # not mission lists
 
     def __init__(self, parent, page):
         super().__init__(parent, text="Missions", padding=6)
@@ -115,10 +131,14 @@ class MissionsPanel(ttk.LabelFrame):
             self.trees[key] = tree
         self.trees["bases"].tag_configure("danger", foreground="#c33")
         self.trees["goals"].tag_configure("done", foreground="#2a7")
+        for tag, col in (("done", "#2a7"), ("running", "#27a"), ("stopped", "#c33"), ("waiting", "#888")):
+            self.trees["terraform"].tag_configure(tag, foreground=col)
         row = ttk.Frame(self)
         row.pack(fill="x", pady=(6, 0))
-        ttk.Button(row, text="New mission…", command=lambda: page.open_planner()).pack(side="left")
-        ttk.Button(row, text="Open…", command=self._open).pack(side="left", padx=4)
+        self.new_btn = ttk.Button(row, text="New mission…", command=lambda: page.open_planner())
+        self.new_btn.pack(side="left")
+        self.open_btn = ttk.Button(row, text="Open…", command=self._open)
+        self.open_btn.pack(side="left", padx=4)
         ttk.Button(row, text="Follow craft", command=self._follow).pack(side="left")
         self.cost_label = ttk.Label(self, foreground="#333")
         self.cost_label.pack(anchor="w", pady=(6, 0))
@@ -142,7 +162,8 @@ class MissionsPanel(ttk.LabelFrame):
         elif m.status in (PENDING, ACTIVE):
             self.page.open_planner(m)
         else:
-            messagebox.showinfo(m.name, f"{m.end_note}\nEnded {short_date(m.ended_et)}", parent=self)
+            from report_window import ReportWindow
+            ReportWindow(self.page, m)
 
     def _follow(self):
         m, craft = self._selected()
@@ -150,7 +171,7 @@ class MissionsPanel(ttk.LabelFrame):
         if not any(self.page.view.focus_craft(self.page.path_key(m, f)) for f in flights):
             messagebox.showinfo("Follow craft", "Select a mission (or craft) that is flying", parent=self)
 
-    def refresh(self, control, now):
+    def refresh(self, control, now, sites=None):
         def flight_cost(f):
             if f.leg_of is not None:
                 return "—"                       # a next leg flies hardware already paid for
@@ -176,7 +197,7 @@ class MissionsPanel(ttk.LabelFrame):
 
         groups = {PENDING: control.by_status(PENDING), ACTIVE: control.by_status(ACTIVE),
                   "done": control.by_status(COMPLETE, LOST)}
-        self._refresh_bases(sites_at(control, now), now)
+        self._refresh_bases(sites_at(control, now) if sites is None else sites, now)
         for key, tree in self.trees.items():
             if key in self.INFO_TABS:
                 continue
@@ -213,6 +234,27 @@ class MissionsPanel(ttk.LabelFrame):
         if verdict.status != PLAYING:
             tree.insert("", "end", values=("Won" if verdict.status == WON else "Failed", verdict.reason),
                         tags=("done",) if verdict.status == WON else ())
+        if verdict.score is not None:
+            tree.insert("", "end", values=("Score", f"{verdict.score}/100"), tags=("done",))
+            for note in verdict.score_notes:
+                tree.insert("", "end", values=("", note))
+
+    def refresh_terraform(self, terraform, sites):
+        """Terraforming tab: each stage, how far along it is, and what's holding it back."""
+        tree = self.trees["terraform"]
+        opened = {iid for iid in tree.get_children() if tree.item(iid, "open")}
+        tree.delete(*tree.get_children())
+        tree.insert("", "end", iid="overall", values=(f"{terraform.body}: overall", f"{terraform.fraction:.0%}"),
+                    tags=("done",) if terraform.complete else ())
+        for k, st in enumerate(terraform.status(sites), 1):
+            if st.state == "done":
+                progress = f"Done {short_date(st.done_et)}"
+            else:
+                progress = f"{st.fraction:.0%} ({st.state})"
+            iid = f"stage{k}"
+            tree.insert("", "end", iid=iid, values=(f"{k}. {st.stage.name}", progress), tags=(st.state,),
+                        open=iid in opened or st.state in ("running", "stopped"))
+            tree.insert(iid, "end", values=("", st.text), tags=(st.state,))
 
     def _refresh_bases(self, sites, now):
         tree = self.trees["bases"]
@@ -278,6 +320,8 @@ class MainPage(ttk.Frame):
         self.tracker = CampaignTracker(scenario)
         self.planner = None
         self.science = Science()   # science points, tech tree and satellites (game/science.py)
+        self.terraform = Terraforming()   # Mars terraforming progress (game/terraform.py)
+        self._unlocks_granted = False
         self.techtree = None
         self._drawn = {}           # path key -> (trajectory, status) currently drawn
         self._deaths_seen = {}     # site name -> deaths already reported in the news
@@ -286,9 +330,16 @@ class MainPage(ttk.Frame):
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
 
-        self.helio = InfoTable(self, "From the Sun",
+        left = ttk.Frame(self)
+        left.grid(row=0, column=0, sticky="ns", padx=(0, 6))
+        left.rowconfigure(1, weight=1)
+        # Pop-up tutorial for the scenario, if it has one (tutorial.py); created in start_view
+        from tutorial import STEPS
+        self.guide = None
+        self._has_guide = scenario.id in STEPS
+        self.helio = InfoTable(left, "From the Sun",
                                [("Body", 70), ("Distance (AU)", 95), ("Speed (km/s)", 90)])
-        self.helio.grid(row=0, column=0, sticky="ns", padx=(0, 6))
+        self.helio.grid(row=1, column=0, sticky="ns")
 
         # Panda3D renders straight into this frame's native window
         # Small requested size: the grid gives it all the space the side panels don't need
@@ -309,19 +360,38 @@ class MainPage(ttk.Frame):
         bar = ttk.Frame(self)
 
         focus = ttk.LabelFrame(bar, text="Camera", padding=4)
+        self.camera_box = focus
         focus.pack(side="left")
-        for name in BODIES:
+        for name in BODIES[:CAMERA_BUTTONS]:
             ttk.Button(focus, text=name, width=8,
                        command=lambda n=name: self.view and self.view.set_focus(n)).pack(side="left", padx=2)
+        outer = tk.StringVar(value="More…")
+        views = {"Whole system": "view_whole_system", "Inner planets": "view_inner_planets"}
+        box = ttk.Combobox(focus, textvariable=outer, values=[*views, *BODIES[CAMERA_BUTTONS:]],
+                           state="readonly", width=13)
+        box.pack(side="left", padx=2)
+
+        def pick(_e):
+            if self.view:
+                choice = outer.get()
+                getattr(self.view, views[choice])() if choice in views else self.view.set_focus(choice)
+            outer.set("More…")                  # so picking the same item again works too
+        box.bind("<<ComboboxSelected>>", pick)
 
         tm = ttk.LabelFrame(bar, text="Time", padding=4)
+        self.time_box = tm
         tm.pack(side="right")
 
         sci = ttk.LabelFrame(bar, text="Science", padding=4)
+        self.science_box = sci
         sci.pack(side="right", padx=6)
         self.science_label = ttk.Label(sci, width=22)
         self.science_label.pack(side="left", padx=2)
-        ttk.Button(sci, text="Tech tree…", command=self.open_techtree).pack(side="left", padx=2)
+        self.techtree_btn = ttk.Button(sci, text="Tech tree…", command=self.open_techtree)
+        self.techtree_btn.pack(side="left", padx=2)
+        if self._has_guide:
+            ttk.Button(sci, text="Guide", width=6,
+                       command=lambda: self.guide and self.guide.resume()).pack(side="left", padx=2)
         # tk.Button supports auto-repeat while held, like holding the arrow keys did
         self.slower_btn = tk.Button(tm, text="Slower", width=7, repeatdelay=300, repeatinterval=50,
                                     command=lambda: self._change_speed("slower"))
@@ -334,8 +404,9 @@ class MainPage(ttk.Frame):
         self.time_label.pack(side="left", padx=(8, 2))
 
         # Latest mission news (launches, landings...)
+        # Its own line under the buttons, so long news never gets squeezed out
         self.news = ttk.Label(bar, foreground="#2a7")
-        self.news.pack(side="left", padx=12)
+        self.news.pack(side="bottom", anchor="w", padx=4, pady=(4, 0), before=bar.winfo_children()[0])
         return bar
 
     def start_view(self):
@@ -348,6 +419,8 @@ class MainPage(ttk.Frame):
         self.view = SolarSystemView(self.view_frame.winfo_id(),
                                     self.view_frame.winfo_width(), self.view_frame.winfo_height())
         self.view_frame.bind("<Configure>", lambda e: self.view.resize(e.width, e.height))
+        from tutorial import coach_for
+        self.guide = coach_for(self, self.tracker.scenario.id)
         self._refresh_tables()
 
     def _change_speed(self, which):
@@ -368,32 +441,45 @@ class MainPage(ttk.Frame):
         self.time_label.config(text=f"{v.date_str()}   {v.days_per_second:+.1f} days/s")
         self.pause_btn.config(text="Resume" if v.paused else "Pause")   # the planner pauses too
 
+        if not self._unlocks_granted:
+            self.science.grant(self.tracker.scenario.unlocked, v.sim_et)     # the scenario's head start
+            self._unlocks_granted = True
         for m in self.control.update(v.sim_et):
             lost = m.status == LOST or any(f.status == LOST for f in m.flights)
-            self.news.config(text=f"{m.name}: launched" if m.status == ACTIVE and not lost else f"{m.name}: {m.end_note}",
-                             foreground="#c33" if lost else "#2a7")
+            text = f"{m.name}: launched" if m.status == ACTIVE and not lost else f"{m.name}: {m.end_note}"
+            if m.status in (COMPLETE, LOST):
+                text += "  (report: Previous tab, Open…)"
+            self.news.config(text=text, foreground="#c33" if lost else "#2a7")
+        sites = sites_at(self.control, v.sim_et)       # replayed once, shared by everything below
         self._report_arrivals()
-        self._report_deaths(v.sim_et)
+        self._report_deaths(v.sim_et, sites)
         for f in self.science.update(self.control, v.sim_et):
             self.news.config(text=f"{f.text}! +{f.points:,.0f} science", foreground="#27a")
         self.science_label.config(text=f"{self.science.balance():,.0f} pts ({self.science.per_day():+.2f}/day)")
         self._sync_paths()
-        self.missions.refresh(self.control, v.sim_et)
-        self._check_goals(v.sim_et)
+        self.missions.refresh(self.control, v.sim_et, sites)
+        for stage in self.terraform.update(sites, v.sim_et):
+            self.news.config(text=f"Terraforming: {stage.name} done! {stage.done_text}", foreground="#2a7")
+        self.missions.refresh_terraform(self.terraform, sites)
+        self._check_goals(v.sim_et, sites)
+        if self.guide is not None:
+            self.guide.refresh()
         self.after(TABLE_MS, self._refresh_tables)
 
-    def _check_goals(self, now):
+    def _check_goals(self, now, sites=None):
         """Update the Goals tab; the moment the scenario is won or lost, pause and say so."""
         was = self.tracker.status
-        verdict = self.tracker.check(self.control, now)     # science points: 0 until they're in the game
+        verdict = self.tracker.check(self.control, now, self.science.earned(),
+                                     satellites=self.science.deployments, terraform=self.terraform, sites=sites)
         self.missions.refresh_goals(self.tracker.scenario, verdict)
         if verdict.status != was:
             if not self.view.paused:
                 self._toggle_pause()
             title = self.tracker.scenario.title
             if verdict.status == WON:
-                messagebox.showinfo(title, f"Scenario complete on {short_date(verdict.et)}!\n{verdict.reason}",
-                                    parent=self)
+                notes = "\n".join(verdict.score_notes)
+                messagebox.showinfo(title, f"Scenario complete on {short_date(verdict.et)}!\n{verdict.reason}\n\n"
+                                           f"Score: {verdict.score}/100\n{notes}", parent=self)
             elif verdict.status == FAILED:
                 messagebox.showwarning(title, f"Scenario failed on {short_date(verdict.et)}.\n{verdict.reason}",
                                        parent=self)
@@ -411,9 +497,9 @@ class MainPage(ttk.Frame):
                         self.news.config(text=f"{m.name}: {f.name} set off", foreground="#2a7")
                 self._flight_status[key] = f.status
 
-    def _report_deaths(self, now):
+    def _report_deaths(self, now, sites=None):
         """Post news when crew die at a base (deaths are replayed, so compare with what we've shown)."""
-        for s in sites_at(self.control, now):
+        for s in (sites_at(self.control, now) if sites is None else sites):
             seen = self._deaths_seen.get(s.name, 0)
             if s.deaths > seen:
                 last = [e for e in s.log if e.deaths][-1]
@@ -494,8 +580,11 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Inner Solar System (JPL DE440)")
-        self.geometry("1400x800")
-        self.minsize(1000, 600)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{min(1400, sw - 20)}x{min(800, sh - 90)}+{max(0, (sw - 1400) // 2)}+0")
+        self.minsize(min(1000, sw - 20), min(600, sh - 90))
+        if sw < 1450 or sh < 880:
+            self.state("zoomed")          # small or scaled-up screen: fill it, so nothing hides under the taskbar
         self.page = StartPage(self, on_start=self.show_main)
         self.page.pack(fill="both", expand=True)
 
