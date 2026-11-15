@@ -4,11 +4,16 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="66101bda-58b8-47c5-b39e-a25439ed5e91" name="Changes" comment="- missions now become idle when in stable orbit&#10;- can now plan next leg of journey when mission becomes idle&#10;- fixed grav assists cannot fly by earth" />
+    <list default="true" id="66101bda-58b8-47c5-b39e-a25439ed5e91" name="Changes" comment="- game now starts paused&#10;- panning by middle mouse button is now always allowed&#10;- removed the free camera button">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
     <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="ExportToHTMLSettings">
+    <option name="OUTPUT_DIRECTORY" value="$PROJECT_DIR$/exportToHTML" />
   </component>
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
@@ -95,7 +100,7 @@
       <updated>1794657448109</updated>
       <workItem from="1794657449119" duration="3556000" />
       <workItem from="1794680688562" duration="9187000" />
-      <workItem from="1794739169429" duration="3415000" />
+      <workItem from="1794739169429" duration="5198000" />
     </task>
     <task id="LOCAL-00001" summary="initial upload">
       <option name="closed" value="true" />
@@ -177,7 +182,15 @@
       <option name="project" value="LOCAL" />
       <updated>1794742660016</updated>
     </task>
-    <option name="localTasksCounter" value="11" />
+    <task id="LOCAL-00011" summary="- game now starts paused&#10;- panning by middle mouse button is now always allowed&#10;- removed the free camera button">
+      <option name="closed" value="true" />
+      <created>1794743024878</created>
+      <option name="number" value="00011" />
+      <option name="presentableId" value="LOCAL-00011" />
+      <option name="project" value="LOCAL" />
+      <updated>1794743024878</updated>
+    </task>
+    <option name="localTasksCounter" value="12" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -205,10 +218,11 @@
     <MESSAGE value="- fixed bug where sometimes clicking on the pork chop graph does not automatically set the plan" />
     <MESSAGE value="- rebalanced the ship components to make tiers more meaningful&#10;- added debug middle stage that is stupidly powerful lmao" />
     <MESSAGE value="- missions now become idle when in stable orbit&#10;- can now plan next leg of journey when mission becomes idle&#10;- fixed grav assists cannot fly by earth" />
-    <option name="LAST_COMMIT_MESSAGE" value="- missions now become idle when in stable orbit&#10;- can now plan next leg of journey when mission becomes idle&#10;- fixed grav assists cannot fly by earth" />
+    <MESSAGE value="- game now starts paused&#10;- panning by middle mouse button is now always allowed&#10;- removed the free camera button" />
+    <option name="LAST_COMMIT_MESSAGE" value="- game now starts paused&#10;- panning by middle mouse button is now always allowed&#10;- removed the free camera button" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/NASASpaceMissionDesignGame$solar_view.coverage" NAME="solar_view Coverage Results" MODIFIED="1794666912431" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
-    <SUITE FILE_PATH="coverage/NASASpaceMissionDesignGame$main.coverage" NAME="main Coverage Results" MODIFIED="1794742145131" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="" />
+    <SUITE FILE_PATH="coverage/NASASpaceMissionDesignGame$main.coverage" NAME="main Coverage Results" MODIFIED="1794743884521" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="" />
   </component>
 </project>
