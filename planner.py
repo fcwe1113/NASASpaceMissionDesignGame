@@ -1416,6 +1416,8 @@ class MissionPlanner(tk.Toplevel):
             problems = c.design.problems(self.catalogue)
             if problems and not self.launched:
                 raise PlanError(f"{c.name}: {problems[0]}")
+        if not self._confirm_endings():
+            return
         flights = [c.flight for c in self.crafts]
         if self.original is None:
             if flights[0].launch_et < self.now:
@@ -1450,6 +1452,37 @@ class MissionPlanner(tk.Toplevel):
             self.original.name = name
             self.page.mission_changed(self.original, old_name)
         self.close()
+
+    def _confirm_endings(self):
+        """Warn if any craft still to fly doesn't end landed, in a stable orbit or back on Earth.
+
+        Such a craft keeps drifting (a flyby, or still travelling when the projection ends):
+        it never becomes idle, so it can't fly on, and its crew eat into their supplies until
+        they run out. Returns True to go ahead and save.
+        """
+        loose = []
+        for c in self.crafts:
+            live = self._live_flight_named(c.name)
+            if live is not None and live.status not in (PENDING, ACTIVE):
+                continue                                  # already arrived or over: nothing to check
+            out = c.flight.outcome
+            if not out.ends_mission:
+                text = out.describe()
+                loose.append(f"• {c.name}: {text[0].lower()}{text[1:]}")
+        if not loose:
+            return True
+        return messagebox.askyesno(
+            "Craft won't arrive anywhere",
+            "These craft don't end their plan landed or in a stable orbit:\n\n" + "\n".join(loose) +
+            "\n\nThey'll keep drifting: they won't arrive (go idle), so they can't fly on later, and "
+            "their crew use up their supplies until they run out.\n\nTip: add a Capture into orbit… or "
+            "Land… burn, or extend \"Show path until\" if the plan arrives later.\n\nSave anyway?",
+            icon="warning", parent=self)
+
+    def _live_flight_named(self, name):
+        if self.original is None:
+            return None
+        return next((f for f in self.original.flights if f.name == name), None)
 
     @_guard
     def _cancel_launch(self):
