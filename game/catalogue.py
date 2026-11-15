@@ -32,6 +32,7 @@ class Stage:
     cost_musd: float
     relaunch: bool = False
     tier: int = 0
+    secret: bool = False            # a hidden unlock (the tech tree can keep it out of sight)
     description: str = ""
 
 

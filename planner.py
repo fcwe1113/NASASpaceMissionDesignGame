@@ -343,7 +343,8 @@ class MissionPlanner(tk.Toplevel):
             + (f"  (tier {l.tier})" if l.tier else "") for l in cat.launchers.values()])
         self.stage_box = picker("Stage", [
             f"{s.name} — Isp {s.isp_s:,.0f} s" + (", can relaunch" if s.relaunch else "")
-            + (f"  (tier {s.tier})" if s.tier else "") for s in cat.stages.values()])
+            + (f"  (tier {s.tier}, secret)" if s.secret else f"  (tier {s.tier})" if s.tier else "")
+            for s in cat.stages.values()])
         for box in (self.launcher_box, self.stage_box):
             box.bind("<<ComboboxSelected>>", lambda e: self._design_changed())
 

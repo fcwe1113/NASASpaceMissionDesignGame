@@ -103,3 +103,20 @@ def test_health_flags_over_mass_and_missing_power():
     assert by_name(assess(heavy))["Mass"].level == BAD
     dark = replace(starter_design(), modules={"capsule2": 1, "supplies": 1})
     assert by_name(assess(dark))["Power"].level == BAD
+
+
+def test_torch_drive_is_the_secret_tier_4():
+    """5-10x the nuclear stage's delta-v for any payload, and it can relaunch."""
+    torch, nuclear = CAT.stages["torch"], CAT.stages["nuclear"]
+    assert torch.tier == 4 and torch.secret and torch.relaunch
+    assert not any(s.secret for s in CAT.stages.values() if s.id != "torch")
+    for payload_kg in (2800, 10_000, 25_000):
+        mods = {"capsule2": 1}
+        extra = payload_kg - CAT.modules["capsule2"].mass_kg
+        d_t = CraftDesign("superheavy", "torch", torch.fuel_capacity_kg, mods, 1)
+        d_n = CraftDesign("superheavy", "nuclear", nuclear.fuel_capacity_kg, mods, 1)
+        # Same payload on both: add the extra mass as plain dry mass
+        c_t, c_n = d_t.physics_craft(), d_n.physics_craft()
+        c_t = replace(c_t, dry_mass=c_t.dry_mass + extra)
+        c_n = replace(c_n, dry_mass=c_n.dry_mass + extra)
+        assert 5 <= c_t.dv_remaining / c_n.dv_remaining <= 10
