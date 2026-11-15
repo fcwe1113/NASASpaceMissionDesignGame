@@ -9,7 +9,8 @@ Setup:
 
 Mouse controls inside the 3D view:
     Right-drag      orbit camera      Scroll       zoom
-    Middle-drag     pan (free camera only)
+    Middle-drag     pan (while following a body, the view keeps moving with it;
+                    press the body's camera button again to re-centre)
 """
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -250,8 +251,6 @@ class MainPage(ttk.Frame):
         for name in BODIES:
             ttk.Button(focus, text=name, width=8,
                        command=lambda n=name: self.view and self.view.set_focus(n)).pack(side="left", padx=2)
-        ttk.Button(focus, text="Free", width=8,
-                   command=lambda: self.view and self.view.set_focus(None)).pack(side="left", padx=2)
 
         tm = ttk.LabelFrame(bar, text="Time", padding=4)
         tm.pack(side="right")

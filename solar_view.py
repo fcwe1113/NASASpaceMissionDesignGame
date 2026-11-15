@@ -7,7 +7,8 @@ by methods (set_focus, faster, slower, toggle_pause) the host can call.
 
 Mouse controls inside the view:
     Right-drag      orbit camera      Scroll       zoom
-    Middle-drag     pan (free camera only)
+    Middle-drag     pan (while following a body, the view keeps moving with it;
+                    press the body's camera button again to re-centre)
 """
 from itertools import groupby
 
@@ -269,7 +270,7 @@ class SolarSystemView:
 
         self.sim_et = spice.str2et(start_date)
         self.days_per_second = 10.0
-        self.paused = False
+        self.paused = True             # the game starts paused
 
         # Runs the simulation step each frame. Created before the EditorCamera so it
         # runs first, like a script-level update() would.
@@ -311,7 +312,8 @@ class SolarSystemView:
         # EditorCamera is a pivot entity; the camera orbits around its position.
         # Move the pivot and the view centre moves with it. Its zoom is proportional
         # to distance, so scrolling works from whole-system view down to a single planet.
-        self.cam = EditorCamera(rotation=(30, 0, 0), pan_speed=Vec2(0, 0))  # panning off while following
+        # Middle-drag pans at any time; while following a body the pan is kept as an offset from it
+        self.cam = EditorCamera(rotation=(30, 0, 0), pan_speed=self.PAN_SPEED)
         camera.z = -700_000            # start with the whole inner solar system in view
         self.cam.target_z = camera.z   # EditorCamera eases camera.z toward target_z, so set both
 
@@ -319,6 +321,8 @@ class SolarSystemView:
         self.focus_target = self.sun   # None = free camera
         self.glide_t = 1.0             # 0 -> 1 during a glide; 1 = locked on
         self.glide_from = Vec3(0, 0, 0)
+        self.focus_offset = Vec3(0, 0, 0)        # panned away from the followed body by this much
+        self._last_follow_pos = Vec3(0, 0, 0)    # where the view centre was put last frame
 
         # Ursina runs each entity's update() in the order the entities were created.
         # EditorCamera pans/rotates/zooms in its own update(), so markers placed
@@ -367,11 +371,10 @@ class SolarSystemView:
         self._focus_on(None if name is None else self.focus_targets[name])
 
     def _focus_on(self, entity):
+        """Follow `entity` (None = free camera). Choosing a body again re-centres on it."""
         self.focus_target = entity
-        if self.focus_target is None:
-            self.cam.pan_speed = self.PAN_SPEED   # free camera: middle-drag pans
-        else:
-            self.cam.pan_speed = Vec2(0, 0)       # locked: panning disabled
+        self.focus_offset = Vec3(0, 0, 0)
+        if self.focus_target is not None:
             self.glide_from = Vec3(self.cam.position)
             self.glide_t = 0.0
 
@@ -427,9 +430,11 @@ class SolarSystemView:
         for path in self.paths.values():
             path.update(self.sim_et)
 
-        # Keep the view centre exactly on the selected body.
+        # Keep the view centre on the selected body (plus any panning).
         # During a switch, ease from the old centre to the (moving) new target,
-        # then lock on with no lag.
+        # then lock on with no lag. The EditorCamera pans by moving its position
+        # in its own update (after this one), so whatever it moved since last
+        # frame is panning: keep it as an offset from the body.
         if self.focus_target is not None:
             target = self.focus_target.world_position
             if self.glide_t < 1.0:
@@ -437,7 +442,9 @@ class SolarSystemView:
                 s = self.glide_t * self.glide_t * (3 - 2 * self.glide_t)   # smoothstep
                 self.cam.position = lerp(self.glide_from, target, s)
             else:
-                self.cam.position = target
+                self.focus_offset += self.cam.position - self._last_follow_pos
+                self.cam.position = target + self.focus_offset
+            self._last_follow_pos = Vec3(self.cam.position)
 
         self.date_text.text = (f"{self.date_str()}   "
                                f"{self.days_per_second:+.1f} days/s{'  (paused)' if self.paused else ''}")
