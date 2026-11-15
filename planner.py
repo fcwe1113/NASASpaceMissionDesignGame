@@ -833,16 +833,36 @@ class MissionPlanner(tk.Toplevel):
             f"orbit capture {g.dv_arrive[f, k]:.2f}, total {g.dv_total[f, m, k]:.2f} km/s; "
             f"{via} pass {g.flyby_alt[f, m, k]:,.0f} km up"))
         alt = parse_float(self.arrive_alt.get(), "Pass altitude")
-        draft = Flight.via_assist(self._craft_name(), target, self._craft(),
-                                   dep, fb, arr, g.v_inf_depart[f, m], via, alt)
-        self._info(f"Gravity assist planned: {via} bends the path {draft.assist.turn_deg:.0f}°. "
-                   f"Burns: departure, flyby set-up, a touch-up after {via}. "
-                   f"Add a capture burn to stay at {target}.")
+        craft = self._craft()
+        if g.dv_depart[f, m] > craft.dv_remaining:
+            # Still apply the pick (so the plan matches the chart), but say why it can't work
+            draft = Flight.to_planet(self._craft_name(), target, craft, dep, fb, g.v_inf_depart[f, m])
+            self._set_draft(draft)
+            self._error(self._cant_leave(g.dv_depart[f, m], craft))
+            return
+        try:
+            draft = Flight.via_assist(self._craft_name(), target, craft, dep, fb, arr, g.v_inf_depart[f, m], via, alt)
+        except PlanningError as exc:
+            draft = Flight.to_planet(self._craft_name(), target, craft, dep, fb, g.v_inf_depart[f, m])
+            self._set_draft(draft)
+            self._error(f"Departure planned, but the {via} flyby couldn't be set up: {exc}")
+            return
+        note = (f"Gravity assist planned: {via} bends the path {draft.assist.turn_deg:.0f}°. "
+                f"Burns: departure, flyby set-up, a touch-up after {via}. Add a capture burn to stay at {target}.")
         out_et = planning.soi_exit_time(draft.trajectory, via)
         if self.land_var.get() and out_et is not None:
-            self._info(f"{via} bends the path {draft.assist.turn_deg:.0f}°; "
-                       + draft.add_landing(out_et + DAY, target, arr))
+            try:
+                note = f"{via} bends the path {draft.assist.turn_deg:.0f}°; " + draft.add_landing(out_et + DAY, target, arr)
+            except PlanningError as exc:
+                note += f" (couldn't plan the landing: {exc})"
         self._set_draft(draft)
+        self._info(note)
+
+    @staticmethod
+    def _cant_leave(dv_depart, craft):
+        return (f"Not enough fuel for this transfer: leaving Earth needs {dv_depart:.2f} km/s, the craft "
+                f"has {craft.dv_remaining:.2f} km/s in total. Pick a greener cell, or a bigger stage or "
+                f"more fuel (Build craft tab).")
 
     @_guard
     def _pick(self, i, j):
@@ -859,20 +879,30 @@ class MissionPlanner(tk.Toplevel):
             f"Departure burn {pc.dv_depart[i, j]:.2f} km/s, orbit capture {pc.dv_arrive[i, j]:.2f} km/s, "
             f"total {pc.dv_total[i, j]:.2f} km/s   (C3 {pc.c3[i, j]:.1f} km²/s²)"))
         craft = self._craft()
-        draft = Flight.to_planet(self._craft_name(), self._target_body(), craft,
-                                  dep, dep + tof, pc.v_inf_depart[i, j])
+        target = self._target_body()
+        draft = Flight.to_planet(self._craft_name(), target, craft, dep, dep + tof, pc.v_inf_depart[i, j])
+        # Always apply the pick, so the plan matches the chart; explain anything that can't be afforded
+        if pc.dv_depart[i, j] > craft.dv_remaining:
+            self._set_draft(draft)
+            self._error(self._cant_leave(pc.dv_depart[i, j], craft))
+            return
         # Patched conics leave a small miss from Earth's SOI; aim properly a day after leaving it
         alt = parse_float(self.arrive_alt.get(), "Pass altitude")
         exit_et = planning.soi_exit_time(draft.trajectory, "Earth")
-        if self.land_var.get() and exit_et is not None:
-            self._info(draft.add_landing(exit_et + DAY, self._target_body(), dep + tof))
-        elif exit_et is not None and exit_et + DAY < dep + tof:
-            before = fly(draft.start, craft, draft.burns, exit_et + DAY)
-            aim, got = planning.aim_burn(before.end, before.craft, self._target_body(), dep + tof, alt)
-            draft.set_plan(draft.burns + [aim])
-            self._info(f"Added a correction burn a day after leaving Earth's SOI: passes "
-                       f"{self._target_body()} at {got:.0f} km. Add a capture burn to stay in orbit.")
+        note, problem = "", None
+        try:
+            if self.land_var.get() and exit_et is not None:
+                note = draft.add_landing(exit_et + DAY, target, dep + tof)
+            elif exit_et is not None and exit_et + DAY < dep + tof:
+                before = fly(draft.start, craft, draft.burns, exit_et + DAY)
+                aim, got = planning.aim_burn(before.end, before.craft, target, dep + tof, alt)
+                draft.set_plan(draft.burns + [aim])
+                note = (f"Added a correction burn a day after leaving Earth's SOI: passes {target} at "
+                        f"{got:.0f} km. Add a capture burn to stay in orbit.")
+        except PlanningError as exc:
+            problem = f"Departure planned, but no correction burn after it: {exc}"
         self._set_draft(draft)
+        self._error(problem) if problem else self._info(note)
 
     # ----- launch: Moon / Earth orbit -----
     @_guard
