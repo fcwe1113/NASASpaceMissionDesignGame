@@ -5,9 +5,14 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="66101bda-58b8-47c5-b39e-a25439ed5e91" name="Changes" comment="made README">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/nasaspacemissiondesigngame.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/nasaspacemissiondesigngame.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/data/catalogue.json" beforeDir="false" afterPath="$PROJECT_DIR$/data/catalogue.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/planner.py" beforeDir="false" afterPath="$PROJECT_DIR$/planner.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/solar_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/solar_view.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -18,6 +23,11 @@
     <option name="OUTPUT_DIRECTORY" value="$PROJECT_DIR$/exportToHTML" />
   </component>
   <component name="Git.Settings">
+    <option name="RECENT_BRANCH_BY_REPOSITORY">
+      <map>
+        <entry key="$PROJECT_DIR$" value="main" />
+      </map>
+    </option>
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
   <component name="GitHubPullRequestSearchHistory">{
@@ -32,6 +42,65 @@
     &quot;accountId&quot;: &quot;c8c46a09-56d1-4b32-80dc-366274ce777c&quot;
   }
 }</component>
+  <component name="NextEditCompletionFeaturesState">
+    <decayedCancelled>
+      <entry key="MS100" value="1.0020361937120559" />
+      <entry key="MS500" value="1.3820818185726473" />
+      <entry key="S2" value="3.963806858436975" />
+      <entry key="S5" value="8.426758604256701" />
+      <entry key="S10" value="13.260148009061762" />
+      <entry key="S30" value="20.15330021748691" />
+      <entry key="S60" value="22.79725803042523" />
+      <entry key="M2" value="24.320693820183262" />
+      <entry key="M5" value="25.31045319092175" />
+      <entry key="M10" value="25.813361493623052" />
+      <entry key="M15" value="26.46680381471904" />
+      <entry key="M30" value="28.900249726456614" />
+      <entry key="H1" value="32.20441997940481" />
+      <entry key="H2" value="34.99395566055043" />
+      <entry key="H4" value="36.815970112871845" />
+      <entry key="D1" value="38.60794358159192" />
+      <entry key="W1" value="38.943263480303415" />
+    </decayedCancelled>
+    <decayedSelected>
+      <entry key="MS100" value="0.0" />
+      <entry key="MS500" value="0.0" />
+      <entry key="S2" value="0.0" />
+      <entry key="S5" value="0.0" />
+      <entry key="S10" value="0.0" />
+      <entry key="S30" value="0.0" />
+      <entry key="S60" value="0.0" />
+      <entry key="M2" value="0.0" />
+      <entry key="M5" value="0.0" />
+      <entry key="M10" value="0.0" />
+      <entry key="M15" value="0.0" />
+      <entry key="M30" value="0.0" />
+      <entry key="H1" value="0.0" />
+      <entry key="H2" value="0.0" />
+      <entry key="H4" value="0.0" />
+      <entry key="D1" value="0.0" />
+      <entry key="W1" value="0.0" />
+    </decayedSelected>
+    <decayedShown>
+      <entry key="MS100" value="0.8969514250320572" />
+      <entry key="MS500" value="1.3555914355491037" />
+      <entry key="S2" value="3.9480147882354397" />
+      <entry key="S5" value="8.413808557695171" />
+      <entry key="S10" value="13.250028403697218" />
+      <entry key="S30" value="20.1481810576613" />
+      <entry key="S60" value="22.794362187212673" />
+      <entry key="M2" value="24.3191488778651" />
+      <entry key="M5" value="25.309809999615545" />
+      <entry key="M10" value="25.81303426215664" />
+      <entry key="M15" value="26.46658184164436" />
+      <entry key="M30" value="28.900132136658076" />
+      <entry key="H1" value="32.20435678182018" />
+      <entry key="H2" value="34.993922211361905" />
+      <entry key="H4" value="36.81595278487413" />
+      <entry key="D1" value="38.607940594756684" />
+      <entry key="W1" value="38.9432630509715" />
+    </decayedShown>
+  </component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 7,
   &quot;fromUser&quot;: false
@@ -49,8 +118,9 @@
     "RunOnceActivity.git.unshallow": "true",
     "RunOnceActivity.typescript.service.memoryLimit.init": "true",
     "codeWithMe.voiceChat.enabledByDefault": "false",
-    "git-widget-placeholder": "main",
+    "git-widget-placeholder": "science-points",
     "last_opened_file_path": "/home/fcwe1113/PycharmProjects/NASASpaceMissionDesignGame/tests",
+    "node.js.selected.package.tslint": "(autodetect)",
     "nodejs_package_manager_path": "npm"
   }
 }]]></component>
@@ -69,14 +139,13 @@
         <env name="PYTHONUNBUFFERED" value="1" />
       </envs>
       <option name="SDK_HOME" value="" />
-      <option name="SDK_NAME" value="~/PycharmProjects/NASASpaceMissionDesignGame/.venv" />
       <option name="WORKING_DIRECTORY" value="" />
       <option name="IS_MODULE_SDK" value="false" />
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
-      <option name="DEBUG_JUST_MY_CODE" value="false" />
       <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
       <option name="RUN_TOOL" value="true" />
+      <option name="RUN_AS_SCRIPT" value="" />
       <option name="SCRIPT_NAME" value="$PROJECT_DIR$/main.py" />
       <option name="PARAMETERS" value="" />
       <option name="SHOW_COMMAND_LINE" value="false" />

@@ -1,0 +1,36 @@
+{
+  "_notes": [
+    "Science points: balancing for game/science.py. Points come mostly from 'firsts' (one-off payouts for exploring a body for the first time); satellites and science bases add a small trickle.",
+    "multiplier: how much everything at a body is worth (harder to reach = more). Bodies not listed earn nothing.",
+    "Parts not in any tech node are always available (tier 0 parts, all launchers, the torch drive)."
+  ],
+  "start_points": 70,
+  "multiplier": {"Moon": 1, "Venus": 2, "Mars": 2, "Mercury": 3},
+
+  "firsts": {
+    "visit":     {"points": 10, "text": "First craft to reach {body}"},
+    "orbit":     {"points": 20, "text": "First orbit of {body}"},
+    "landing":   {"points": 30, "text": "First landing on {body}"},
+    "crewed":    {"points": 50, "text": "First crew to land on {body} and live"},
+    "satellite": {"points": 20, "text": "First satellite at {body}"},
+    "base":      {"points": 40, "text": "First science base on {body}"}
+  },
+  "earth_satellite_points": 10,
+
+  "satellite_points_per_day": 0.05,
+  "base_kit_points_per_day": 0.1,
+  "crewed_base_factor": 2,
+
+  "tech": [
+    {"id": "methalox",  "name": "Methalox engines",  "cost": 40,  "needs": [], "parts": ["methalox"]},
+    {"id": "landers",   "name": "Reusable landers",  "cost": 40,  "needs": [], "parts": ["lander"]},
+    {"id": "capsule4",  "name": "Big capsule",       "cost": 40,  "needs": [], "parts": ["capsule4"]},
+    {"id": "longstay",  "name": "Long stays",        "cost": 40,  "needs": [], "parts": ["habitat4", "supplies_l"]},
+    {"id": "power",     "name": "Better power",      "cost": 40,  "needs": [], "parts": ["solar_l"]},
+    {"id": "life",      "name": "Life support",      "cost": 40,  "needs": [], "parts": ["recycler"]},
+    {"id": "hydrolox",  "name": "Hydrolox engines",  "cost": 120, "needs": ["methalox"], "parts": ["hydrolox"]},
+    {"id": "farming",   "name": "Farming",           "cost": 120, "needs": ["life"], "parts": ["farm"]},
+    {"id": "nuclear",   "name": "Nuclear thermal",   "cost": 300, "needs": ["hydrolox"], "parts": ["nuclear"]},
+    {"id": "ion",       "name": "Ion drive",         "cost": 300, "needs": ["power"], "parts": ["ion"]}
+  ]
+}

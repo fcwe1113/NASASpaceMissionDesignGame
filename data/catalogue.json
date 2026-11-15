@@ -79,6 +79,9 @@
      "description": "Grows enough food for one crew member."},
     {"id": "science",   "name": "Science kit",             "kind": "science",  "mass_kg": 500,   "power_kw": -0.5,
      "cost_musd": 10, "tier": 0,
-     "description": "Instruments for experiments (earns science points)."}
+     "description": "Instruments for experiments (earns science points)."},
+    {"id": "satellite", "name": "Science satellite",       "kind": "satellite", "mass_kg": 300,  "power_kw": 0.0,
+     "cost_musd": 15, "tier": 0,
+     "description": "Carried on board, then left behind in orbit (Deploy satellite, once the craft has settled in orbit). Earns science points."}
   ]
 }
