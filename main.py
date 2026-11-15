@@ -19,9 +19,9 @@ from game import catalogue
 from game.base import sites_at
 from game.campaign import FAILED, PLAYING, WON, CampaignTracker, scenarios
 from game.mission import ACTIVE, COMPLETE, IDLE, LOST, PENDING, MissionControl
+from game.science import Science
 from physics import ephemeris
 
-FRAME_MS = 1          # delay between rendered frames (vsync sets the real rate)
 TABLE_MS = 250        # how often the side tables refresh
 MIN_SPEED = 0.5       # days/s; the Slower button is disabled below this
 BODIES = ["Sun", "Mercury", "Venus", "Earth", "Mars", "Moon"]
@@ -277,6 +277,8 @@ class MainPage(ttk.Frame):
         self.control = MissionControl()
         self.tracker = CampaignTracker(scenario)
         self.planner = None
+        self.science = Science()   # science points, tech tree and satellites (game/science.py)
+        self.techtree = None
         self._drawn = {}           # path key -> (trajectory, status) currently drawn
         self._deaths_seen = {}     # site name -> deaths already reported in the news
         self._flight_status = {}   # path key -> status last seen (for arrival news)
@@ -314,6 +316,12 @@ class MainPage(ttk.Frame):
 
         tm = ttk.LabelFrame(bar, text="Time", padding=4)
         tm.pack(side="right")
+
+        sci = ttk.LabelFrame(bar, text="Science", padding=4)
+        sci.pack(side="right", padx=6)
+        self.science_label = ttk.Label(sci, width=22)
+        self.science_label.pack(side="left", padx=2)
+        ttk.Button(sci, text="Tech tree…", command=self.open_techtree).pack(side="left", padx=2)
         # tk.Button supports auto-repeat while held, like holding the arrow keys did
         self.slower_btn = tk.Button(tm, text="Slower", width=7, repeatdelay=300, repeatinterval=50,
                                     command=lambda: self._change_speed("slower"))
@@ -340,7 +348,6 @@ class MainPage(ttk.Frame):
         self.view = SolarSystemView(self.view_frame.winfo_id(),
                                     self.view_frame.winfo_width(), self.view_frame.winfo_height())
         self.view_frame.bind("<Configure>", lambda e: self.view.resize(e.width, e.height))
-        self._tick()
         self._refresh_tables()
 
     def _change_speed(self, which):
@@ -353,10 +360,6 @@ class MainPage(ttk.Frame):
         if self.view:
             self.view.toggle_pause()
             self.pause_btn.config(text="Resume" if self.view.paused else "Pause")
-
-    def _tick(self):
-        self.view.step()
-        self.after(FRAME_MS, self._tick)
 
     def _refresh_tables(self):
         v = self.view
@@ -371,6 +374,9 @@ class MainPage(ttk.Frame):
                              foreground="#c33" if lost else "#2a7")
         self._report_arrivals()
         self._report_deaths(v.sim_et)
+        for f in self.science.update(self.control, v.sim_et):
+            self.news.config(text=f"{f.text}! +{f.points:,.0f} science", foreground="#27a")
+        self.science_label.config(text=f"{self.science.balance():,.0f} pts ({self.science.per_day():+.2f}/day)")
         self._sync_paths()
         self.missions.refresh(self.control, v.sim_et)
         self._check_goals(v.sim_et)
@@ -428,6 +434,21 @@ class MainPage(ttk.Frame):
     def planner_closed(self, planner):
         self.planner = None
 
+    def open_techtree(self):
+        from techtree import TechTreeWindow
+        if self.techtree is not None:
+            self.techtree.lift()
+            return
+        self.techtree = TechTreeWindow(self)
+
+    def techtree_closed(self):
+        self.techtree = None
+
+    def tech_changed(self):
+        """Something was unlocked or a satellite deployed: refresh what shows it."""
+        if self.planner is not None:
+            self.planner.tech_changed()
+
     def mission_changed(self, mission, old_name=None, removed=False, old_flights=None):
         """Called by the planner after it schedules, edits, cancels or ends a mission."""
         for name in {old_name, mission.name} - {None}:
@@ -483,7 +504,41 @@ class App(tk.Tk):
         self.page = MainPage(self, scenario)
         self.page.pack(fill="both", expand=True)
         self.page.start_view()
+        # Leave Tk's mainloop: from here on Ursina runs the loop (see run_game).
+        self.quit()
+
+    def run_game(self):
+        """Let Ursina own the main loop and let Tk handle its events once per frame.
+
+        On Windows, Tk and Panda3D share one message queue, so running Panda's
+        frames from inside Tk's mainloop crashed ("GIL is released"). Here Tk only
+        runs inside root.update(), called by Ursina between frames.
+        """
+        from winloop import MessageGuard
+        # Keep Tk's window messages out of Panda's hands (see winloop.py for why)
+        guard = MessageGuard(self.page.view.app.win.getWindowHandle().getIntHandle())
+        closing = False
+
+        def on_close():
+            nonlocal closing
+            closing = True
+
+        def pump():
+            if closing:
+                return False                 # tells the view to exit the program
+            try:
+                with guard.tk_turn():
+                    self.update()            # handle clicks, timers, redraws for Tk
+            except tk.TclError:              # the Tk window is gone
+                return False
+            return True
+
+        self.protocol("WM_DELETE_WINDOW", on_close)
+        self.page.view.run(pump)             # never returns
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    app = App()
+    app.mainloop()                           # the start page, until Start is pressed
+    if isinstance(app.page, MainPage) and app.page.view is not None:
+        app.run_game()

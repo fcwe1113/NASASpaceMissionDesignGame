@@ -1,8 +1,9 @@
 """
 3D inner solar system view using real JPL ephemeris data, embedded in a host window.
 
-The host (see main.py) owns the event loop: it creates a SolarSystemView inside one
-of its native windows and calls step() repeatedly. Keyboard controls are replaced
+The host (see main.py) creates a SolarSystemView inside one of its native windows,
+then calls run(), which hands the main loop to Ursina and calls the host back once
+per frame so it can handle its own events. Keyboard controls are replaced
 by methods (set_focus, faster, slower, toggle_pause) the host can call.
 
 Mouse controls inside the view:
@@ -333,9 +334,18 @@ class SolarSystemView:
         self._late_updater.update = self._update_markers
 
     # ---------- Host interface ----------
-    def step(self):
-        """Advance and render one frame."""
-        self.app.taskMgr.step()
+    def run(self, on_frame):
+        """Hand the main loop to Ursina. Never returns.
+
+        on_frame() is called once per frame (the host uses it to let Tk handle its
+        own events). When it returns False the host has closed, so the app exits.
+        """
+        def pump(task):
+            if on_frame() is False:
+                self.app.userExit()      # closes the 3D window and exits the program
+            return task.cont
+        self.app.taskMgr.add(pump, "host-pump")
+        self.app.run(info=False)
 
     def resize(self, width, height):
         props = WindowProperties()

@@ -605,6 +605,8 @@ class MissionPlanner(tk.Toplevel):
         if status == ACTIVE:
             self.declare_btn = ttk.Button(row, text="End this craft's flight here", command=self._declare)
             self.declare_btn.pack(side="left")
+            self.deploy_btn = ttk.Button(row, text="Deploy satellite", command=self._deploy)   # science
+            self.deploy_btn.pack(side="left", padx=4)
 
     # ----- state helpers -----
     @property
@@ -676,6 +678,7 @@ class MissionPlanner(tk.Toplevel):
         if live is None or not self._can_fly_on():
             raise PlanError("Only a craft that has arrived somewhere (idle) can fly on")
         start = next_leg_start(self.control, self.original, live, self.now)
+        start.design = self.page.science.without_deployed(live, start.design)   # satellites left behind
         draft = CraftDraft(next_leg_name(self.original, live), start.design, origin=start.body,
                            leg_of=live.name, leg_start=start)
         draft.target = leg_targets(start.body)[0][0]
@@ -792,6 +795,11 @@ class MissionPlanner(tk.Toplevel):
         except PlanError as exc:
             self._error(exc)
             return
+        locked = self.page.science.newly_locked(self.craft.design, d)     # tech tree
+        if locked:
+            self._error(f"Locked: {locked[0]}. Unlock it in the Tech tree")
+            self._load_design(self.craft.design)
+            return
         self._apply_design(d)
 
     def _apply_design(self, d):
@@ -814,11 +822,13 @@ class MissionPlanner(tk.Toplevel):
             m = self.catalogue.modules[mid]
             n = d.modules.get(mid, 0)
             power = f"{m.power_kw:+.1f} kW" if m.power_kw else ""
+            lock = "" if self.page.science.is_unlocked(mid) else "  (locked)"
             self.module_tree.insert("", "end", iid=mid, values=(
-                m.name + (f"  (tier {m.tier})" if m.tier else ""), n if n else "",
+                m.name + (f"  (tier {m.tier})" if m.tier else "") + lock, n if n else "",
                 f"{m.mass_kg / 1000:.1f} t", power, f"${m.cost_musd:,.0f}M"),
                 tags=("onboard",) if n else ())
         self.module_tree.tag_configure("onboard", background="#dff3e4")
+        self._mark_locked_stages()
         self.fuel_max.config(text=f"of {self.catalogue.stages[d.stage].fuel_capacity_kg:,.0f} kg")
         if sel and self.module_tree.exists(sel[0]):
             self.module_tree.selection_set(sel)
@@ -839,7 +849,11 @@ class MissionPlanner(tk.Toplevel):
         d = self.craft.design
         modules = dict(d.modules)
         modules[sel[0]] = max(0, modules.get(sel[0], 0) + delta)
-        self._apply_design(replace(d, modules={k: v for k, v in modules.items() if v}))
+        new = replace(d, modules={k: v for k, v in modules.items() if v})
+        locked = self.page.science.newly_locked(d, new)                   # tech tree
+        if locked:
+            raise PlanError(f"Locked: {locked[0]}. Unlock it in the Tech tree")
+        self._apply_design(new)
         self._fill_module_tree()
 
     # ----- target and route -----
@@ -1301,6 +1315,7 @@ class MissionPlanner(tk.Toplevel):
 
     # ----- refresh -----
     def _refresh(self):
+        self._refresh_deploy()
         self.burn_tree.delete(*self.burn_tree.get_children())
         self.event_tree.delete(*self.event_tree.get_children())
         self._refresh_mission_info()
@@ -1416,6 +1431,9 @@ class MissionPlanner(tk.Toplevel):
             problems = c.design.problems(self.catalogue)
             if problems and not self.launched:
                 raise PlanError(f"{c.name}: {problems[0]}")
+            locked = self.page.science.locked_parts(c.design)            # tech tree
+            if locked and not self.launched:
+                raise PlanError(f"{c.name}: {locked[0]} is locked. Unlock it in the Tech tree")
         if not self._confirm_endings():
             return
         flights = [c.flight for c in self.crafts]
@@ -1499,6 +1517,43 @@ class MissionPlanner(tk.Toplevel):
         live.declare_complete(self.now)
         self.page.mission_changed(self.original)
         self.close()
+
+    # ----- science (game/science.py) -----
+    def tech_changed(self):
+        """Called by MainPage after an unlock: refresh the (locked) labels."""
+        self._fill_module_tree()
+        self._refresh_deploy()
+
+    def _mark_locked_stages(self):
+        sci, cat = self.page.science, self.catalogue
+        values = [f"{s.name} — Isp {s.isp_s:,.0f} s" + (", can relaunch" if s.relaunch else "")
+                  + (f"  (tier {s.tier}, secret)" if s.secret else f"  (tier {s.tier})" if s.tier else "")
+                  + ("" if sci.is_unlocked(sid) else "  (locked)") for sid, s in cat.stages.items()]
+        if list(self.stage_box.cget("values")) != values:
+            k = self.stage_box.current()
+            self.stage_box.config(values=values)
+            if k >= 0:
+                self.stage_box.current(k)
+
+    def _refresh_deploy(self):
+        if not hasattr(self, "deploy_btn"):
+            return
+        live = self._live_flight()
+        sci = self.page.science
+        n = sci.satellites_on_board(live) if live is not None else 0
+        ok = live is not None and sci.deploy_problem(live) is None
+        self.deploy_btn.config(text=f"Deploy satellite ({n} on board)" if n > 0 else "Deploy satellite",
+                               state="normal" if ok else "disabled")
+
+    @_guard
+    def _deploy(self):
+        live = self._live_flight()
+        if live is None:
+            raise PlanError("This craft hasn't launched yet")
+        self.page.science.deploy(live, self.now)
+        self._info(f"{live.name} left a satellite in orbit around {live.location()[0]}")
+        self._refresh_deploy()
+        self.page.tech_changed()
 
     def close(self):
         for key in self._preview_keys:
