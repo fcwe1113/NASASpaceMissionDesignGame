@@ -1,6 +1,6 @@
 # Space Mission Design Game
 
-This is a hackathon project developed during the [NASA Space Apps Challenge](https://www.spaceappschallenge.org/), developed by both me and Rohit Godhwani.
+This is a hackathon project developed during the [NASA Space Apps Challenge](https://www.spaceappschallenge.org/), developed by both me and [Rohit Godhwani](https://github.com/RohitGODHWANI).
 
 ## Features
 
