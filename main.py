@@ -52,6 +52,11 @@ class InfoTable(ttk.LabelFrame):
             self.tree.insert("", "end", values=row)
 
 
+def money(musd):
+    """$M amount for display."""
+    return f"${musd:,.0f}M"
+
+
 def short_date(et):
     return ephemeris.et2str(et)[:11]
 
@@ -60,9 +65,9 @@ class MissionsPanel(ttk.LabelFrame):
     """Pending launches, ongoing missions and previous missions."""
 
     TABS = [
-        (PENDING, "Pending", [("Name", 110), ("Target", 70), ("Launch", 90)]),
-        (ACTIVE, "Ongoing", [("Name", 110), ("Orbiting", 70), ("Plan ends with", 150)]),
-        ("done", "Previous", [("Name", 110), ("Ended", 90), ("Result", 150)]),
+        (PENDING, "Pending", [("Name", 110), ("Target", 70), ("Launch", 90), ("Cost", 65)]),
+        (ACTIVE, "Ongoing", [("Name", 110), ("Orbiting", 70), ("Plan ends with", 150), ("Cost", 65)]),
+        ("done", "Previous", [("Name", 110), ("Ended", 90), ("Result", 150), ("Cost", 65)]),
         ("bases", "Bases", [("What", 120), ("Details", 230)]),
     ]
 
@@ -78,7 +83,7 @@ class MissionsPanel(ttk.LabelFrame):
             tree.column("#0", width=18, stretch=False)          # expand/collapse arrows for craft rows
             for col, width in cols:
                 tree.heading(col, text=col)
-                tree.column(col, width=width, anchor="w")
+                tree.column(col, width=width, anchor="e" if col == "Cost" else "w")
             if key != "bases":
                 tree.bind("<Double-1>", lambda e: self._open())
             self.notebook.add(tree, text=title)
@@ -89,6 +94,8 @@ class MissionsPanel(ttk.LabelFrame):
         ttk.Button(row, text="New mission…", command=lambda: page.open_planner()).pack(side="left")
         ttk.Button(row, text="Open…", command=self._open).pack(side="left", padx=4)
         ttk.Button(row, text="Follow craft", command=self._follow).pack(side="left")
+        self.cost_label = ttk.Label(self, foreground="#333")
+        self.cost_label.pack(anchor="w", pady=(6, 0))
 
     def _selected(self):
         """(mission, craft name or None) for the selected row. Craft rows are 'mission/craft'."""
@@ -118,18 +125,28 @@ class MissionsPanel(ttk.LabelFrame):
             messagebox.showinfo("Follow craft", "Select a mission (or craft) that is flying", parent=self)
 
     def refresh(self, control, now):
+        def flight_cost(f):
+            if f.leg_of is not None:
+                return "—"                       # a next leg flies hardware already paid for
+            return money(f.design.cost()) if f.design is not None else ""
+
         def flight_row(m, f, key):
             if key == PENDING:
-                return f.name, f.target, ""
+                return f.name, f.target, "", flight_cost(f)
             if key == ACTIVE:
                 if f.status == IDLE:
-                    return f.name, f.location()[0], f.end_note
+                    return f.name, f.location()[0], f.end_note, flight_cost(f)
                 if f.status == PENDING:
-                    return f.name, "", f"Next leg, leaves {short_date(f.launch_et)}"
+                    return f.name, "", f"Next leg, leaves {short_date(f.launch_et)}", flight_cost(f)
                 if f.status != ACTIVE:
-                    return f.name, "", f.end_note
-                return f.name, f.state_at(now).body, f.outcome.describe()
-            return f.name, short_date(f.ended_et) if f.ended_et else "", f.end_note
+                    return f.name, "", f.end_note, flight_cost(f)
+                return f.name, f.state_at(now).body, f.outcome.describe(), flight_cost(f)
+            return f.name, short_date(f.ended_et) if f.ended_et else "", f.end_note, flight_cost(f)
+
+        costs = control.costs()
+        self.cost_label.config(text=(
+            f"Campaign cost: {money(costs.total)}  "
+            f"({money(costs.spent)} launched, {money(costs.committed)} scheduled)"))
 
         groups = {PENDING: control.by_status(PENDING), ACTIVE: control.by_status(ACTIVE),
                   "done": control.by_status(COMPLETE, LOST)}
@@ -142,11 +159,11 @@ class MissionsPanel(ttk.LabelFrame):
             tree.delete(*tree.get_children())
             for m in groups[key]:
                 if key == PENDING:
-                    values = (m.name, m.target, short_date(m.launch_et))
+                    values = (m.name, m.target, short_date(m.launch_et), money(m.cost()))
                 elif key == ACTIVE:
-                    values = (m.name, f"{len(m.flights)} craft", "")
+                    values = (m.name, f"{len(m.flights)} craft", "", money(m.cost()))
                 else:
-                    values = (m.name, short_date(m.ended_et) if m.ended_et else "", "")
+                    values = (m.name, short_date(m.ended_et) if m.ended_et else "", "", money(m.cost()))
                 tree.insert("", "end", iid=m.name, values=values, open=m.name in open_rows or key == ACTIVE)
                 for f in m.flights:
                     tree.insert(m.name, "end", iid=f"{m.name}/{f.name}", values=flight_row(m, f, key))
