@@ -71,14 +71,18 @@ class CraftDesign:
                 total += m.power_kw * n
         return total
 
-    def supply_days(self, catalogue=None):
-        """How long the food and water on board last the crew (inf if they never run out)."""
+    def supply_days(self, catalogue=None, food=None, water=None):
+        """How long the food and water on board last the crew (inf if they never run out).
+
+        `food`/`water` (kg) override the full supply pods, e.g. for a next leg
+        that has already eaten into them.
+        """
         c = self._cat(catalogue)
         items = self.items(c)
         if self.crew <= 0:
             return math.inf
-        food = sum(m.food_kg * n for m, n in items)
-        water = sum(m.water_kg * n for m, n in items)
+        food = sum(m.food_kg * n for m, n in items) if food is None else food
+        water = sum(m.water_kg * n for m, n in items) if water is None else water
         recycling = min(0.95, sum(m.water_recycling * n for m, n in items))
         grown = sum(m.food_kg_per_day * n for m, n in items)
         food_use = self.crew * c.food_per_crew_day - grown
@@ -133,8 +137,11 @@ def _margin_level(have, need):
     return WARN if have < need * (1 + MARGIN) else OK
 
 
-def assess(design, flight=None, catalogue=None):
-    """Health indicators for a design, using its planned flight when there is one."""
+def assess(design, flight=None, catalogue=None, food=None, water=None):
+    """Health indicators for a design, using its planned flight when there is one.
+
+    `food`/`water` (kg): what is actually on board, if not the design's full supply pods.
+    """
     c = catalogue or cat_module.default()
     out = []
     launcher = c.launchers[design.launcher]
@@ -153,7 +160,7 @@ def assess(design, flight=None, catalogue=None):
     else:
         out.append(Indicator("Δv", INFO, f"has {have:.2f} km/s (no burns planned yet)"))
 
-    days = design.supply_days(c)
+    days = design.supply_days(c, food=food, water=water)
     days_text = "never run out" if math.isinf(days) else f"last {days:,.0f} days"
     if flight is not None:
         needed = (flight.end_et - flight.launch_et) / DAY

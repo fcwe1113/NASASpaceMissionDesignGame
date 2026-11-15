@@ -134,19 +134,54 @@ def deorbit_burn(state):
     b = BODIES[state.body]
     if b.parent is None:
         raise PlanningError("Can't land on the Sun")
-    goal = DEORBIT_DEPTH * b.radius
     if state.elements.periapsis < b.radius:
         raise PlanningError(f"The craft already comes down on {state.body} without a burn")
-    # Periapsis grows with speed (for a fixed direction): bisect the speed factor
+    return periapsis_burn(state, DEORBIT_DEPTH * b.radius)
+
+
+def periapsis_burn(state, rp_goal):
+    """Burn along the direction of travel, right now, that puts the lowest point at `rp_goal` km.
+
+    Periapsis grows with speed for a fixed direction, so the speed factor is
+    bisected: below 1 slows the craft (lowers it), above 1 speeds it up (raises it).
+    """
+    mu = BODIES[state.body].gm
+    rp = lambda k: kepler.elements(state.r, state.v * k, mu).periapsis
     lo, hi = 0.0, 1.0
+    while rp(hi) < rp_goal:
+        lo, hi = hi, hi * 2
+        if hi > 64:
+            raise PlanningError("Can't raise the orbit that far with one burn")
     for _ in range(60):
         k = (lo + hi) / 2
-        if kepler.elements(state.r, state.v * k, b.gm).periapsis > goal:
+        if rp(k) > rp_goal:
             hi = k
         else:
             lo = k
-    dv = (1 - lo) * np.linalg.norm(state.v)
-    return Burn(state.et, prograde=-float(dv))
+    dv = (lo - 1) * np.linalg.norm(state.v)
+    return Burn(state.et, prograde=float(dv))
+
+
+PARK_ALT = {"Moon": 100.0, "Mercury": 200.0, "Venus": 300.0, "Earth": 200.0, "Mars": 200.0}
+
+
+def parent_return(origin, et_depart, tof, park_alt=None):
+    """(parking-orbit state, departure burn) that leaves a moon and falls to its parent's surface.
+
+    Solved like a launch window: Lambert, in the parent's frame, from the moon to
+    a point inside the parent (so the path ends in a touchdown) `tof` s later.
+    """
+    o = BODIES[origin]
+    parent = BODIES[o.parent]
+    if parent.parent is None:
+        raise PlanningError(f"{origin} orbits the Sun; use a transfer to another planet instead")
+    r0, v0 = bodies.body_state(origin, et_depart)
+    # Aim half a radius off-centre, across the moon's direction, so Lambert isn't degenerate
+    across = np.cross([0.0, 0.0, 1.0], r0)
+    aim = LANDING_DEPTH * parent.radius * across / np.linalg.norm(across)
+    v1, _ = lambert(r0, aim, tof, parent.gm)
+    alt = PARK_ALT.get(origin, 200.0) if park_alt is None else park_alt
+    return departure(origin, et_depart, v1 - v0, alt)
 
 
 def best_departure_point(state, target, et_arrive, samples=72, max_period=10 * 86_400):

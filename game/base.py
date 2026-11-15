@@ -2,21 +2,22 @@
 
 Sites fill up as craft arrive:
   * a craft that lands leaves everything on the surface of that body;
-  * a craft whose flight is declared complete in orbit becomes part of that orbit's site.
-Hardware stays put (until relaunching is added). Crew use food and water every
-day; farms and recyclers help. Crew die, with no grace period:
+  * a craft that settles into a stable orbit becomes part of that orbit's site.
+A craft flying on (a next leg) takes its own hardware, fuel, surviving crew and
+its share of the supplies with it; everything else stays. Crew use food and
+water every day; farms and recyclers help. Crew die, with no grace period:
   * on landing, if there aren't enough habitat places for them (a capsule isn't one);
   * the moment the site's food or water runs out.
 
-Everything is replayed from the arrivals in time order, so the state at any
-moment is deterministic and needs no saved running totals.
+Everything is replayed from the arrivals and departures in time order, so the
+state at any moment is deterministic and needs no saved running totals.
 """
 from dataclasses import dataclass, field
 import math
 
 from . import catalogue as cat_module
 from .design import distance_au
-from .mission import COMPLETE
+from .mission import PENDING
 
 DAY = 86_400.0
 SURFACE, ORBIT = "surface", "orbit"
@@ -24,6 +25,7 @@ SURFACE, ORBIT = "surface", "orbit"
 
 @dataclass
 class Arrival:
+    """A delivery to a site (or, with leaving=True, a craft flying on and taking things away)."""
     et: float
     body: str
     where: str                 # SURFACE or ORBIT
@@ -34,6 +36,7 @@ class Arrival:
     fuel: float
     modules: dict              # module id -> count
     stage: str
+    leaving: bool = False
 
 
 @dataclass
@@ -95,25 +98,40 @@ def use_rates(crew, modules, catalogue):
             crew * catalogue.water_per_crew_day * (1 - recycling))
 
 
+def flight_supplies(flight, et, catalogue):
+    """(food, water) kg a flight's crew still has at `et`, from what it set out with."""
+    d = flight.design
+    items = d.items(catalogue)
+    food = sum(m.food_kg * n for m, n in items) if flight.food0 is None else flight.food0
+    water = sum(m.water_kg * n for m, n in items) if flight.water0 is None else flight.water0
+    food_use, water_use = use_rates(d.crew, d.modules, catalogue)
+    days = (et - flight.launch_et) / DAY
+    return max(0.0, food - food_use * days), max(0.0, water - water_use * days)
+
+
 def arrivals(control, catalogue=None):
-    """Every delivery to a site so far planned, from finished flights with a known design."""
+    """Every delivery to, and departure from, a site so far: from craft that have arrived
+    (idle or ended there) and next legs that have left. Only craft with a known design count."""
     c = catalogue or cat_module.default()
     out = []
     for m in control.missions:
         for f in m.flights:
-            if f.design is None or f.status != COMPLETE or f.ended_et is None:
+            if f.design is None:
                 continue
-            out_kind = f.outcome.kind
-            if out_kind == "impact":
-                where, body = SURFACE, f.outcome.body
-            elif f.end_note.startswith("Stable orbit"):
-                where, body = ORBIT, f.state_at(f.ended_et).body
-            else:
-                continue                        # returned to Earth: crew go home, nothing is left
-            d = f.design
-            food, water = transit_supplies(d, (f.ended_et - f.launch_et) / DAY, c)
-            out.append(Arrival(f.ended_et, body, where, f"{m.name}: {f.name}", d.crew, food, water,
-                               max(0.0, f.trajectory.craft.fuel), dict(d.modules), d.stage))
+            if f.idle_since is not None and f.location() is not None:
+                body, where = f.location()
+                food, water = flight_supplies(f, f.idle_since, c)
+                out.append(Arrival(f.idle_since, body, where, f"{m.name}: {f.name}", f.design.crew, food,
+                                   water, max(0.0, f.craft_at_arrival_fuel()), dict(f.design.modules),
+                                   f.design.stage))
+            if f.leg_of is not None and f.status != PENDING:
+                parent = m.flight(f.leg_of)
+                loc = parent.location()
+                if loc is None:
+                    continue
+                out.append(Arrival(f.launch_et, loc[0], loc[1], f"{m.name}: {f.name}", f.design.crew,
+                                   f.food0 or 0.0, f.water0 or 0.0, max(0.0, parent.craft_at_arrival_fuel()),
+                                   dict(f.design.modules), f.design.stage, leaving=True))
     return sorted(out, key=lambda a: a.et)
 
 
@@ -129,6 +147,9 @@ def site_at(body, where, site_arrivals, et, catalogue=None):
         if t is not None:
             _consume(s, t, a.et, c)
         t = a.et
+        if a.leaving:
+            _leave(s, a, c)
+            continue
         for mid, n in a.modules.items():
             s.modules[mid] = s.modules.get(mid, 0) + n
         s.stages[a.stage] = s.stages.get(a.stage, 0) + 1
@@ -152,6 +173,23 @@ def site_at(body, where, site_arrivals, et, catalogue=None):
     _rates(s, c)
     s.power_kw = _power(s, body, c)
     return s
+
+
+def _leave(s, a, c):
+    """A craft flies on, taking its own hardware, fuel, crew and supplies."""
+    for mid, n in a.modules.items():
+        s.modules[mid] = max(0, s.modules.get(mid, 0) - n)
+        if not s.modules[mid]:
+            del s.modules[mid]
+    s.stages[a.stage] = max(0, s.stages.get(a.stage, 0) - 1)
+    if not s.stages[a.stage]:
+        del s.stages[a.stage]
+    s.crew = max(0, s.crew - a.crew)
+    s.food = max(0.0, s.food - a.food)
+    s.water = max(0.0, s.water - a.water)
+    s.fuel = max(0.0, s.fuel - a.fuel)
+    s.habitat_places = sum(c.modules[mid].habitat_places * n for mid, n in s.modules.items())
+    s.log.append(LogEntry(a.et, f"{a.source} left with {a.crew} crew"))
 
 
 def _rates(s, c):

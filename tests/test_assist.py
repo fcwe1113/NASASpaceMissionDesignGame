@@ -163,3 +163,33 @@ def test_outcome_names_the_last_body_passed(evm_2030):
     out = mission.outcome
     assert out.kind == "flyby" and out.body == "Mars"
     assert out.altitude == pytest.approx(300, abs=5)
+
+
+# ---------- Earth as the flyby planet ----------
+@pytest.fixture(scope="module")
+def vem_2028():
+    """Venus -> Earth flyby -> Mars (e.g. a next leg from Venus orbit)."""
+    flyby = ephemeris.str2et("2027-01-01") + np.arange(0, 730, 4) * DAY
+    return assist_search("Venus", "Earth", "Mars", flyby,
+                         np.linspace(60, 400, 40) * DAY, np.linspace(80, 500, 40) * DAY)
+
+
+def test_search_finds_earth_flyby_routes(vem_2028):
+    f, m, k = vem_2028.best("fuel")
+    assert vem_2028.dv_total[f, m, k] < 7
+    assert vem_2028.flyby_alt[f, m, k] >= MIN_FLYBY_ALT
+
+
+def test_earth_flyby_mission_flies(vem_2028):
+    f, m, k = vem_2028.best("fuel")
+    depart, flyby, arrive = vem_2028.route(f, m, k)
+    mission = Flight.via_assist("Earth assist", "Mars", CRAFT, depart, flyby, arrive,
+                                vem_2028.v_inf_depart[f, m], "Earth", origin="Venus")
+    assert mission.start.body == "Venus"
+    entries = [e.body for e in mission.trajectory.events if e.kind == "soi_entry"]
+    assert entries[:2] == ["Earth", "Mars"]
+    earth = planning.first_visit(mission.trajectory, "Earth")
+    assert earth.start.elements.periapsis - BODIES["Earth"].radius == pytest.approx(
+        mission.assist.planned_alt, abs=5)
+    assert mission.burns[1].dv < 0.3 and mission.burns[2].dv < 0.3     # Earth does the bending
+    assert mission.outcome.body == "Mars"

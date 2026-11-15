@@ -3,7 +3,7 @@ import pytest
 from game import catalogue
 from game.base import ORBIT, SURFACE, arrivals, site_at, sites_at, transit_supplies
 from game.design import CraftDesign
-from game.mission import COMPLETE, LOST, Flight, Mission, MissionControl
+from game.mission import COMPLETE, IDLE, LOST, Flight, Mission, MissionControl
 from physics import ephemeris
 
 DAY = 86_400.0
@@ -141,7 +141,7 @@ def test_landing_before_supplies_run_out_is_fine():
     assert f.starve_et() > f.outcome.et
     mc = control_with(("Luna", [f]))
     landed(mc)
-    assert f.status == COMPLETE
+    assert f.status == IDLE and f.end_note == "Idle on Moon (surface)"
 
 
 def test_transit_supplies_helper():

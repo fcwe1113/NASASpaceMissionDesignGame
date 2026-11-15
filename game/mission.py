@@ -2,14 +2,17 @@
 
 A Mission is one launch: one or more craft leaving Earth on the same date. Each
 craft has its own Flight: a start in a parking orbit and a plan of burns, with
-its own destination.
+its own destination. A craft that has arrived somewhere can fly on: its next
+leg is another Flight, starting from a parking orbit around where it is.
 
-Flight life cycle:  pending -> active (at launch) -> complete | lost
+Flight life cycle:  pending -> active (at launch) -> idle -> complete | lost
   - pending: everything can change.
   - active:  the craft and launch are fixed; burns already carried out are
              locked; future burns can be added, edited or removed.
-  - complete: ended by an impact (landing), returning to Earth, or the
-             player declaring a stable orbit.
+  - idle:    arrived: landed, or settled in a stable orbit with no burns left
+             (held for a full lap). Can fly on (a next leg) or be ended there.
+  - complete: returned to Earth, ended by the player, or continued as a next leg.
+  - lost:    the crew died (ran out of food or water on the way).
 
 Missions are deterministic: the whole flight is re-flown from launch with the
 current plan, and since past burns can't change, neither can the past path.
@@ -22,9 +25,14 @@ from physics import BODIES, Burn, Craft, State, fly, is_stable_orbit, parking_or
 from physics import assist, kepler, planning
 from physics.trajectory import CoastSegment
 
-PENDING, ACTIVE, COMPLETE, LOST = "pending", "active", "complete", "lost"
+PENDING, ACTIVE, IDLE, COMPLETE, LOST = "pending", "active", "idle", "complete", "lost"
 PARKING_ALT = 200.0          # km, where every mission starts
 DAY = 86_400.0
+
+
+def park_alt(body):
+    """Parking-orbit altitude (km) for starting a flight at `body`."""
+    return planning.PARK_ALT.get(body, PARKING_ALT)
 
 
 class PlanError(ValueError):
@@ -72,25 +80,41 @@ class Flight:
         self.now = -math.inf           # sim time of the last update()
         self.assist = None             # the last gravity assist planned (assist.AssistPlan)
         self.design = None             # the CraftDesign the craft was built from, if any
+        self.food0 = self.water0 = None    # supplies at the start, if not the design's full pods (legs)
+        self.leg_of = None             # name of the flight this one continues, for next legs
+        self.idle_since = None         # when it arrived (went idle)
 
     # ---------- Construction ----------
     @classmethod
-    def to_planet(cls, name, target, craft, depart_et, arrive_et, v_inf):
+    def to_planet(cls, name, target, craft, depart_et, arrive_et, v_inf, origin="Earth"):
         """Departure burn onto a porkchop transfer (correction/capture burns are added separately)."""
-        start, dep = planning.departure("Earth", depart_et, v_inf, PARKING_ALT)
+        start, dep = planning.departure(origin, depart_et, v_inf, park_alt(origin))
         return cls(name, target, craft, start, [dep], horizon_et=arrive_et + 30 * DAY)
 
     @classmethod
-    def via_assist(cls, name, target, craft, depart_et, flyby_et, arrive_et, v_inf, via, arrive_alt=300.0):
+    def park(cls, name, craft, body, et, altitude=None):
+        """Sit in a circular parking orbit around `body` (no burns)."""
+        start = parking_orbit(body, et, park_alt(body) if altitude is None else altitude)
+        return cls(name, body, craft, start, [], horizon_et=et + DAY)
+
+    @classmethod
+    def to_parent(cls, name, craft, origin, depart_et, tof):
+        """From a moon back down to its planet (e.g. Moon -> Earth), landing there."""
+        start, dep = planning.parent_return(origin, depart_et, tof)
+        return cls(name, BODIES[origin].parent, craft, start, [dep], horizon_et=depart_et + tof + 5 * DAY)
+
+    @classmethod
+    def via_assist(cls, name, target, craft, depart_et, flyby_et, arrive_et, v_inf, via, arrive_alt=300.0,
+                   origin="Earth"):
         """Departure, the burn that sets up a gravity assist at `via`, and the touch-up after it.
 
         Raises PlanningError if the craft can't afford the burns or the flyby is impossible.
         """
-        start, dep = planning.departure("Earth", depart_et, v_inf, PARKING_ALT)
+        start, dep = planning.departure(origin, depart_et, v_inf, park_alt(origin))
         m = cls(name, target, craft, start, [dep], horizon_et=arrive_et + 30 * DAY)
-        exit_et = planning.soi_exit_time(fly(start, craft, [dep], depart_et + 30 * DAY), "Earth")
+        exit_et = planning.soi_exit_time(fly(start, craft, [dep], depart_et + 30 * DAY), origin)
         if exit_et is None or exit_et + DAY >= flyby_et:
-            raise planning.PlanningError("The craft doesn't leave Earth in time for the flyby")
+            raise planning.PlanningError(f"The craft doesn't leave {origin} in time for the flyby")
         m.add_assist(exit_et + DAY, via, flyby_et, target, arrive_et, arrive_alt)
         return m
 
@@ -157,8 +181,7 @@ class Flight:
 
     @classmethod
     def earth_orbit(cls, name, craft, launch_et, altitude=PARKING_ALT):
-        start = parking_orbit("Earth", launch_et, altitude)
-        return cls(name, "Earth", craft, start, [], horizon_et=launch_et + DAY)
+        return cls.park(name, craft, "Earth", launch_et, altitude)
 
     # ---------- Flight ----------
     @property
@@ -267,40 +290,73 @@ class Flight:
         self._changed()
 
     # ---------- Progress ----------
+    def idle_et(self):
+        """When the craft arrives and goes idle: touchdown (not on Earth: that's a return home),
+        or a full lap into its final stable orbit with no burns left. None if it never does."""
+        out = self.outcome
+        if out.kind == "impact":
+            return out.et
+        if out.kind == "orbit":
+            seg = self.trajectory.segments[-1]
+            return seg.start.et + seg.start.elements.period(seg.start.mu)
+        return None
+
+    def craft_at_arrival_fuel(self):
+        """Fuel (kg) left once every planned burn is done, i.e. on arrival."""
+        return self.trajectory.craft.fuel
+
+    def location(self):
+        """(body, "surface" or "orbit") where an idle or ended craft sits, else None."""
+        out = self.outcome
+        if out.kind == "impact":
+            return out.body, "surface"
+        if out.kind == "orbit":
+            return out.body, "orbit"
+        return None
+
     def update(self, now):
         """Advance the status to `now`. Returns True if it changed."""
         old = self.status
         self.now = now
         if self.status == PENDING and now >= self.launch_et:
             self.status = ACTIVE
-        if self.status == ACTIVE:
+        if self.status in (ACTIVE, IDLE):
             # Make sure the projection always reaches the present
             if now > self.horizon_et and self.trajectory.end_reason != "impact":
                 self.horizon_et = now + 30 * DAY
                 self._changed()
+        if self.status == ACTIVE:
             out = self.outcome
             starve = self.starve_et()
-            arrives = out.et if out.kind in ("impact", "returned") else math.inf
-            if starve is not None and starve < arrives and now >= starve:
+            returned = out.et if out.kind == "returned" else math.inf
+            idle = self.idle_et() or math.inf
+            if starve is not None and starve < min(returned, idle) and now >= starve:
                 # No grace period: the crew die the moment the food or water runs out
                 self.status = LOST
                 self.ended_et = starve
                 self.end_note = f"Lost: the crew ran out of supplies {(starve - self.launch_et) / DAY:.0f} days in"
-            elif now >= arrives:
+            elif now >= returned:
                 self.status = COMPLETE
                 self.ended_et = out.et
                 self.end_note = out.describe()
+            elif now >= idle:
+                body, where = self.location()
+                self.status = IDLE
+                self.idle_since = idle
+                self.end_note = f"Idle on {body} (surface)" if where == "surface" else f"Idle in {body} orbit"
         return self.status != old
 
     def starve_et(self):
         """When the crew on board run out of food or water (None if never, or no design known)."""
         if self.design is None or self.design.crew <= 0:
             return None
-        days = self.design.supply_days()
+        days = self.design.supply_days(food=self.food0, water=self.water0)
         return None if math.isinf(days) else self.launch_et + days * DAY
 
     def can_declare_complete(self, now):
-        """In a stable orbit, with no burns still to come and a full lap since the last one."""
+        """Idle; or in a stable orbit, with no burns still to come and a full lap since the last one."""
+        if self.status == IDLE:
+            return True
         if self.status != ACTIVE or any(b.et > now for b in self.burns):
             return False
         s = self.state_at(now)
@@ -311,16 +367,22 @@ class Flight:
         return now - seg.start.et >= period
 
     def declare_complete(self, now):
+        """End the flight where it is (its crew and hardware stay there)."""
         if not self.can_declare_complete(now):
-            raise PlanError("A mission can only be ended in a stable orbit held for a full lap "
-                            "(or by landing / returning to Earth)")
-        s = self.state_at(now)
+            raise PlanError("A flight can only be ended once it has arrived: landed, or in a stable "
+                            "orbit held for a full lap (or by returning to Earth)")
+        where = self.location()
+        if self.status != IDLE:
+            self.idle_since = now
         self.status = COMPLETE
         self.ended_et = now
-        self.end_note = f"Stable orbit around {s.body}"
-        self.burns = [b for b in self.burns if b.et <= now]
-        self.horizon_et = now
-        self._changed()
+        if where and where[1] == "surface":
+            self.end_note = f"Ended on {where[0]} (surface)"
+        else:
+            self.end_note = f"Stable orbit around {self.state_at(now).body}"
+            self.burns = [b for b in self.burns if b.et <= now]
+            self.horizon_et = now
+            self._changed()
 
     def burn_time(self, burn):
         """Seconds the burn lasts with the fuel the craft has left by then."""
@@ -329,11 +391,11 @@ class Flight:
 
 
 class Mission:
-    """One launch: several craft (flights) leaving Earth on the same date.
+    """One launch: several craft (flights) leaving Earth on the same date, plus any later legs.
 
-    Status: pending before launch; active while any craft is still flying;
-    complete once every craft has ended (and at least one ended well); lost if
-    every craft was lost.
+    Status: pending before launch; active while any craft is still flying, idle
+    or waiting to fly on; complete once every craft has ended (and at least one
+    ended well); lost if every craft was lost.
     """
 
     def __init__(self, name, flights):
@@ -342,31 +404,37 @@ class Mission:
         names = [f.name for f in flights]
         if len(set(names)) != len(names):
             raise PlanError("Each craft in a mission needs its own name")
-        if len({f.launch_et for f in flights}) > 1:
+        if len({f.launch_et for f in flights if f.leg_of is None}) > 1:
             raise PlanError("All craft in a mission launch together, on the same date")
         self.name = name
         self.flights = list(flights)
 
     @property
+    def first_legs(self):
+        return [f for f in self.flights if f.leg_of is None]
+
+    @property
     def launch_et(self):
-        return self.flights[0].launch_et
+        return self.first_legs[0].launch_et
 
     @property
     def target(self):
         """Where the first craft is going (for lists)."""
-        return self.flights[0].target
+        return self.first_legs[0].target
 
     @property
     def status(self):
         states = {f.status for f in self.flights}
-        if states == {PENDING}:
+        if states == {PENDING} and all(f.leg_of is None for f in self.flights):
             return PENDING
-        if states & {PENDING, ACTIVE}:
+        if states & {PENDING, ACTIVE, IDLE}:
             return ACTIVE
         return LOST if states == {LOST} else COMPLETE
 
     @property
     def ended_et(self):
+        if self.status not in (COMPLETE, LOST):
+            return None
         ends = [f.ended_et for f in self.flights if f.ended_et is not None]
         return max(ends) if ends else None
 
@@ -379,13 +447,20 @@ class Mission:
         return next(f for f in self.flights if f.name == name)
 
     def cost(self):
-        return sum(f.design.cost() for f in self.flights if f.design is not None)
+        return sum(f.design.cost() for f in self.first_legs if f.design is not None)
 
     def update(self, now):
         """Advance every flight. Returns True if the mission's status changed."""
         old = self.status
         for f in self.flights:
             f.update(now)
+            if f.leg_of is not None and f.status != PENDING:
+                parent = self.flight(f.leg_of)
+                if parent.status == IDLE:
+                    # Flying on: the earlier leg ends where the new one leaves
+                    parent.status = COMPLETE
+                    parent.ended_et = f.launch_et
+                    parent.end_note = f"Flew on as {f.name}"
         return self.status != old
 
     def set_flights(self, flights):
@@ -394,6 +469,19 @@ class Mission:
             raise PlanError("Craft can't be added or removed after launch")
         Mission(self.name, flights)            # validates
         self.flights = list(flights)
+
+    def add_leg(self, flight):
+        """Add a next leg for an idle craft (`flight.leg_of` names it)."""
+        parent = self.flight(flight.leg_of)
+        if parent.status != IDLE:
+            raise PlanError(f"{parent.name} has to have arrived (be idle) before it can fly on")
+        if any(f.leg_of == parent.name and f.status == PENDING for f in self.flights):
+            raise PlanError(f"{parent.name} already has a next leg planned")
+        if flight.launch_et < parent.idle_since:
+            raise PlanError(f"The next leg can't leave before {parent.name} has arrived")
+        if any(f.name == flight.name for f in self.flights):
+            raise PlanError(f"There is already a craft called {flight.name!r} in this mission")
+        self.flights.append(flight)
 
 
 class MissionControl:

@@ -16,7 +16,7 @@ from tkinter import messagebox, ttk
 
 from game import catalogue
 from game.base import sites_at
-from game.mission import ACTIVE, COMPLETE, LOST, PENDING, MissionControl
+from game.mission import ACTIVE, COMPLETE, IDLE, LOST, PENDING, MissionControl
 from physics import ephemeris
 
 FRAME_MS = 1          # delay between rendered frames (vsync sets the real rate)
@@ -121,6 +121,10 @@ class MissionsPanel(ttk.LabelFrame):
             if key == PENDING:
                 return f.name, f.target, ""
             if key == ACTIVE:
+                if f.status == IDLE:
+                    return f.name, f.location()[0], f.end_note
+                if f.status == PENDING:
+                    return f.name, "", f"Next leg, leaves {short_date(f.launch_et)}"
                 if f.status != ACTIVE:
                     return f.name, "", f.end_note
                 return f.name, f.state_at(now).body, f.outcome.describe()
@@ -214,6 +218,7 @@ class MainPage(ttk.Frame):
         self.planner = None
         self._drawn = {}           # path key -> (trajectory, status) currently drawn
         self._deaths_seen = {}     # site name -> deaths already reported in the news
+        self._flight_status = {}   # path key -> status last seen (for arrival news)
 
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
@@ -272,7 +277,7 @@ class MainPage(ttk.Frame):
         from solar_view import SolarSystemView   # heavy import; only needed from here on
         from ursina import color
         self.PREVIEW_COLOR = color.cyan
-        self.PATH_COLORS = {PENDING: color.violet, ACTIVE: color.lime}
+        self.PATH_COLORS = {PENDING: color.violet, ACTIVE: color.lime, IDLE: color.orange}
         self.view = SolarSystemView(self.view_frame.winfo_id(),
                                     self.view_frame.winfo_width(), self.view_frame.winfo_height())
         self.view_frame.bind("<Configure>", lambda e: self.view.resize(e.width, e.height))
@@ -305,10 +310,24 @@ class MainPage(ttk.Frame):
             lost = m.status == LOST or any(f.status == LOST for f in m.flights)
             self.news.config(text=f"{m.name}: launched" if m.status == ACTIVE and not lost else f"{m.name}: {m.end_note}",
                              foreground="#c33" if lost else "#2a7")
+        self._report_arrivals()
         self._report_deaths(v.sim_et)
         self._sync_paths()
         self.missions.refresh(self.control, v.sim_et)
         self.after(TABLE_MS, self._refresh_tables)
+
+    def _report_arrivals(self):
+        """News when a craft arrives somewhere (goes idle) or a next leg sets off."""
+        for m in self.control.missions:
+            for f in m.flights:
+                key = self.path_key(m, f)
+                old = self._flight_status.get(key)
+                if old is not None and old != f.status:
+                    if f.status == IDLE:
+                        self.news.config(text=f"{m.name}: {f.name} arrived: {f.end_note}", foreground="#2a7")
+                    elif f.status == ACTIVE and f.leg_of is not None:
+                        self.news.config(text=f"{m.name}: {f.name} set off", foreground="#2a7")
+                self._flight_status[key] = f.status
 
     def _report_deaths(self, now):
         """Post news when crew die at a base (deaths are replayed, so compare with what we've shown)."""
@@ -353,7 +372,7 @@ class MainPage(ttk.Frame):
         live = {}
         for m in self.control.by_status(PENDING, ACTIVE):
             for f in m.flights:
-                if f.status in (PENDING, ACTIVE):
+                if f.status in (PENDING, ACTIVE, IDLE):
                     live[self.path_key(m, f)] = (m, f)
         for key in list(self._drawn):
             if key not in live:
