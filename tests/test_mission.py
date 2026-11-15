@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from game.mission import (ACTIVE, COMPLETE, PENDING, Flight, Mission, MissionControl, PlanError)
+from game.mission import (ACTIVE, COMPLETE, LOST, PENDING, Flight, Mission, MissionControl, PlanError)
 from physics import Burn, Craft, ephemeris
 from physics import planning
 
@@ -176,3 +176,52 @@ def test_burn_time_uses_the_fuel_left():
     m.set_plan([b])
     assert m.burn_time(b) == pytest.approx(ion.burn_time(0.5))
     assert m.burn_time(b) > DAY
+
+
+# ---------- Campaign costs ----------
+def designed(flight, design):
+    flight.design = design
+    return flight
+
+
+def test_campaign_costs_split_spent_and_committed():
+    from game.design import CraftDesign, starter_design
+    d1 = starter_design()
+    d2 = CraftDesign("heavy", "methalox", 30_000, {"capsule2": 1, "supplies": 1, "solar_s": 1}, 2)
+    flown = Mission("Flown", [designed(Flight.earth_orbit("A", d1.physics_craft(), ET), d1),
+                              designed(Flight.earth_orbit("B", d2.physics_craft(), ET), d2)])
+    later = Mission("Later", [designed(Flight.earth_orbit("C", d1.physics_craft(), ET + 30 * DAY), d1)])
+    mc = MissionControl()
+    mc.add(flown)
+    mc.add(later)
+    mc.update(ET + 60)                                  # "Flown" launches, "Later" is still scheduled
+
+    c = mc.costs()
+    assert c.spent == pytest.approx(d1.cost() + d2.cost())
+    assert c.committed == pytest.approx(d1.cost())
+    assert c.total == pytest.approx(c.spent + c.committed)
+    assert c.by_mission == {"Flown": pytest.approx(d1.cost() + d2.cost()), "Later": pytest.approx(d1.cost())}
+
+    mc.remove(later)                                    # cancelling gets the money back
+    assert mc.costs().committed == 0 and mc.costs().total == pytest.approx(c.spent)
+
+
+def test_lost_missions_still_cost_and_legs_are_free():
+    from game.design import CraftDesign
+    d = CraftDesign("medium", "storable", 5000, {"capsule2": 1, "solar_s": 1}, 2)    # no supplies: lost
+    m = Mission("Doomed", [designed(Flight.earth_orbit("A", d.physics_craft(), ET), d)])
+    mc = MissionControl()
+    mc.add(m)
+    mc.update(ET + 60)
+    assert m.status == LOST
+    assert mc.costs().spent == pytest.approx(d.cost())
+    leg = designed(Flight.earth_orbit("A leg 2", d.physics_craft(), ET + DAY), d)
+    leg.leg_of = "A"
+    m.flights.append(leg)                                # a next leg adds no new hardware cost
+    assert m.cost() == pytest.approx(d.cost())
+
+
+def test_flights_without_a_design_cost_nothing():
+    mc = MissionControl()
+    mc.add(Mission("Bare", [Flight.earth_orbit("A", CRAFT, ET)]))
+    assert mc.costs().total == 0

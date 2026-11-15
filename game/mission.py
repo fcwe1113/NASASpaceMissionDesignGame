@@ -484,6 +484,17 @@ class Mission:
         self.flights.append(flight)
 
 
+@dataclass
+class CampaignCost:
+    spent: float          # $M on missions that have launched
+    committed: float      # $M on scheduled launches not yet flown
+    by_mission: dict      # mission name -> $M
+
+    @property
+    def total(self):
+        return self.spent + self.committed
+
+
 class MissionControl:
     """Every mission in the campaign."""
 
@@ -506,6 +517,18 @@ class MissionControl:
 
     def by_status(self, *statuses):
         return [m for m in self.missions if m.status in statuses]
+
+    def costs(self):
+        """Campaign spending, in $M.
+
+        spent: missions that have launched (whatever happened to them since,
+        lost ones included: the money is gone). committed: scheduled launches
+        not yet flown (cancelling one gets its money back). Next legs are free:
+        they fly hardware that's already paid for.
+        """
+        spent = sum(m.cost() for m in self.missions if m.status != PENDING)
+        committed = sum(m.cost() for m in self.missions if m.status == PENDING)
+        return CampaignCost(spent, committed, {m.name: m.cost() for m in self.missions})
 
     def unique_name(self, base):
         names = {m.name for m in self.missions}

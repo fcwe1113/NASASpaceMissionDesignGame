@@ -17,6 +17,7 @@ from tkinter import messagebox, ttk
 
 from game import catalogue
 from game.base import sites_at
+from game.campaign import FAILED, PLAYING, WON, CampaignTracker, scenarios
 from game.mission import ACTIVE, COMPLETE, IDLE, LOST, PENDING, MissionControl
 from physics import ephemeris
 
@@ -30,8 +31,30 @@ class StartPage(ttk.Frame):
     def __init__(self, parent, on_start):
         super().__init__(parent, padding=40)
         ttk.Label(self, text="Inner Solar System", font=("TkDefaultFont", 28, "bold")).pack(pady=(80, 10))
-        ttk.Label(self, text="Real planet positions from JPL's DE440 ephemeris").pack(pady=(0, 40))
-        ttk.Button(self, text="Start", command=on_start, width=20).pack(ipady=8)
+        ttk.Label(self, text="Real planet positions from JPL's DE440 ephemeris").pack(pady=(0, 30))
+        self.scenarios = scenarios()
+        titles = [s.title for s in self.scenarios.values()]
+        self.choice = tk.StringVar(value=titles[0])
+        ttk.Label(self, text="Scenario").pack()
+        box = ttk.Combobox(self, textvariable=self.choice, values=titles, state="readonly", width=30)
+        box.pack(pady=(2, 4))
+        self.about = ttk.Label(self, foreground="#555", wraplength=420, justify="center")
+        self.about.pack(pady=(0, 20))
+        box.bind("<<ComboboxSelected>>", lambda e: self._describe())
+        self._describe()
+        ttk.Button(self, text="Start", command=lambda: on_start(self.scenario()), width=20).pack(ipady=8)
+
+    def scenario(self):
+        return next(s for s in self.scenarios.values() if s.title == self.choice.get())
+
+    def _describe(self):
+        s = self.scenario()
+        limits = []
+        if s.budget is not None:
+            limits.append(f"Budget {money(s.budget)}")
+        if s.deadline is not None:
+            limits.append(f"by {short_date(s.deadline)}")
+        self.about.config(text=s.description + ("\n" + ", ".join(limits) if limits else ""))
 
 
 class InfoTable(ttk.LabelFrame):
@@ -52,6 +75,11 @@ class InfoTable(ttk.LabelFrame):
             self.tree.insert("", "end", values=row)
 
 
+def money(musd):
+    """$M amount for display."""
+    return f"${musd:,.0f}M"
+
+
 def short_date(et):
     return ephemeris.et2str(et)[:11]
 
@@ -60,11 +88,13 @@ class MissionsPanel(ttk.LabelFrame):
     """Pending launches, ongoing missions and previous missions."""
 
     TABS = [
-        (PENDING, "Pending", [("Name", 110), ("Target", 70), ("Launch", 90)]),
-        (ACTIVE, "Ongoing", [("Name", 110), ("Orbiting", 70), ("Plan ends with", 150)]),
-        ("done", "Previous", [("Name", 110), ("Ended", 90), ("Result", 150)]),
+        (PENDING, "Pending", [("Name", 110), ("Target", 70), ("Launch", 90), ("Cost", 65)]),
+        (ACTIVE, "Ongoing", [("Name", 110), ("Orbiting", 70), ("Plan ends with", 150), ("Cost", 65)]),
+        ("done", "Previous", [("Name", 110), ("Ended", 90), ("Result", 150), ("Cost", 65)]),
         ("bases", "Bases", [("What", 120), ("Details", 230)]),
+        ("goals", "Goals", [("Goal", 200), ("Progress", 150)]),
     ]
+    INFO_TABS = ("bases", "goals")       # not mission lists
 
     def __init__(self, parent, page):
         super().__init__(parent, text="Missions", padding=6)
@@ -78,22 +108,25 @@ class MissionsPanel(ttk.LabelFrame):
             tree.column("#0", width=18, stretch=False)          # expand/collapse arrows for craft rows
             for col, width in cols:
                 tree.heading(col, text=col)
-                tree.column(col, width=width, anchor="w")
-            if key != "bases":
+                tree.column(col, width=width, anchor="e" if col == "Cost" else "w")
+            if key not in self.INFO_TABS:
                 tree.bind("<Double-1>", lambda e: self._open())
             self.notebook.add(tree, text=title)
             self.trees[key] = tree
         self.trees["bases"].tag_configure("danger", foreground="#c33")
+        self.trees["goals"].tag_configure("done", foreground="#2a7")
         row = ttk.Frame(self)
         row.pack(fill="x", pady=(6, 0))
         ttk.Button(row, text="New mission…", command=lambda: page.open_planner()).pack(side="left")
         ttk.Button(row, text="Open…", command=self._open).pack(side="left", padx=4)
         ttk.Button(row, text="Follow craft", command=self._follow).pack(side="left")
+        self.cost_label = ttk.Label(self, foreground="#333")
+        self.cost_label.pack(anchor="w", pady=(6, 0))
 
     def _selected(self):
         """(mission, craft name or None) for the selected row. Craft rows are 'mission/craft'."""
         key = self.TABS[self.notebook.index("current")][0]
-        if key == "bases":
+        if key in self.INFO_TABS:
             return None, None
         tree = self.trees[key]
         sel = tree.selection()
@@ -118,35 +151,45 @@ class MissionsPanel(ttk.LabelFrame):
             messagebox.showinfo("Follow craft", "Select a mission (or craft) that is flying", parent=self)
 
     def refresh(self, control, now):
+        def flight_cost(f):
+            if f.leg_of is not None:
+                return "—"                       # a next leg flies hardware already paid for
+            return money(f.design.cost()) if f.design is not None else ""
+
         def flight_row(m, f, key):
             if key == PENDING:
-                return f.name, f.target, ""
+                return f.name, f.target, "", flight_cost(f)
             if key == ACTIVE:
                 if f.status == IDLE:
-                    return f.name, f.location()[0], f.end_note
+                    return f.name, f.location()[0], f.end_note, flight_cost(f)
                 if f.status == PENDING:
-                    return f.name, "", f"Next leg, leaves {short_date(f.launch_et)}"
+                    return f.name, "", f"Next leg, leaves {short_date(f.launch_et)}", flight_cost(f)
                 if f.status != ACTIVE:
-                    return f.name, "", f.end_note
-                return f.name, f.state_at(now).body, f.outcome.describe()
-            return f.name, short_date(f.ended_et) if f.ended_et else "", f.end_note
+                    return f.name, "", f.end_note, flight_cost(f)
+                return f.name, f.state_at(now).body, f.outcome.describe(), flight_cost(f)
+            return f.name, short_date(f.ended_et) if f.ended_et else "", f.end_note, flight_cost(f)
+
+        costs = control.costs()
+        self.cost_label.config(text=(
+            f"Campaign cost: {money(costs.total)}  "
+            f"({money(costs.spent)} launched, {money(costs.committed)} scheduled)"))
 
         groups = {PENDING: control.by_status(PENDING), ACTIVE: control.by_status(ACTIVE),
                   "done": control.by_status(COMPLETE, LOST)}
         self._refresh_bases(sites_at(control, now), now)
         for key, tree in self.trees.items():
-            if key == "bases":
+            if key in self.INFO_TABS:
                 continue
             selected = tree.selection()
             open_rows = {iid for iid in tree.get_children() if tree.item(iid, "open")}
             tree.delete(*tree.get_children())
             for m in groups[key]:
                 if key == PENDING:
-                    values = (m.name, m.target, short_date(m.launch_et))
+                    values = (m.name, m.target, short_date(m.launch_et), money(m.cost()))
                 elif key == ACTIVE:
-                    values = (m.name, f"{len(m.flights)} craft", "")
+                    values = (m.name, f"{len(m.flights)} craft", "", money(m.cost()))
                 else:
-                    values = (m.name, short_date(m.ended_et) if m.ended_et else "", "")
+                    values = (m.name, short_date(m.ended_et) if m.ended_et else "", "", money(m.cost()))
                 tree.insert("", "end", iid=m.name, values=values, open=m.name in open_rows or key == ACTIVE)
                 for f in m.flights:
                     tree.insert(m.name, "end", iid=f"{m.name}/{f.name}", values=flight_row(m, f, key))
@@ -154,6 +197,22 @@ class MissionsPanel(ttk.LabelFrame):
             if keep:
                 tree.selection_set(keep)
 
+
+    def refresh_goals(self, scenario, verdict):
+        tree = self.trees["goals"]
+        tree.delete(*tree.get_children())
+        if scenario.sandbox:
+            tree.insert("", "end", values=("Sandbox", "No goals: fly whatever you like"))
+        for goal, p in verdict.goals:
+            text = ("Done " + short_date(p.et) if p.et is not None else "Done") if p.done else p.detail
+            tree.insert("", "end", values=(goal.title, text), tags=("done",) if p.done else ())
+        if scenario.budget is not None:
+            tree.insert("", "end", values=("Budget", f"{money(scenario.budget)} (launched missions count)"))
+        if scenario.deadline is not None:
+            tree.insert("", "end", values=("Deadline", short_date(scenario.deadline)))
+        if verdict.status != PLAYING:
+            tree.insert("", "end", values=("Won" if verdict.status == WON else "Failed", verdict.reason),
+                        tags=("done",) if verdict.status == WON else ())
 
     def _refresh_bases(self, sites, now):
         tree = self.trees["bases"]
@@ -212,10 +271,11 @@ class MissionsPanel(ttk.LabelFrame):
 
 
 class MainPage(ttk.Frame):
-    def __init__(self, parent):
+    def __init__(self, parent, scenario):
         super().__init__(parent, padding=6)
         self.view = None
         self.control = MissionControl()
+        self.tracker = CampaignTracker(scenario)
         self.planner = None
         self._drawn = {}           # path key -> (trajectory, status) currently drawn
         self._deaths_seen = {}     # site name -> deaths already reported in the news
@@ -313,7 +373,24 @@ class MainPage(ttk.Frame):
         self._report_deaths(v.sim_et)
         self._sync_paths()
         self.missions.refresh(self.control, v.sim_et)
+        self._check_goals(v.sim_et)
         self.after(TABLE_MS, self._refresh_tables)
+
+    def _check_goals(self, now):
+        """Update the Goals tab; the moment the scenario is won or lost, pause and say so."""
+        was = self.tracker.status
+        verdict = self.tracker.check(self.control, now)     # science points: 0 until they're in the game
+        self.missions.refresh_goals(self.tracker.scenario, verdict)
+        if verdict.status != was:
+            if not self.view.paused:
+                self._toggle_pause()
+            title = self.tracker.scenario.title
+            if verdict.status == WON:
+                messagebox.showinfo(title, f"Scenario complete on {short_date(verdict.et)}!\n{verdict.reason}",
+                                    parent=self)
+            elif verdict.status == FAILED:
+                messagebox.showwarning(title, f"Scenario failed on {short_date(verdict.et)}.\n{verdict.reason}",
+                                       parent=self)
 
     def _report_arrivals(self):
         """News when a craft arrives somewhere (goes idle) or a next leg sets off."""
@@ -401,9 +478,9 @@ class App(tk.Tk):
         self.page = StartPage(self, on_start=self.show_main)
         self.page.pack(fill="both", expand=True)
 
-    def show_main(self):
+    def show_main(self, scenario):
         self.page.destroy()
-        self.page = MainPage(self)
+        self.page = MainPage(self, scenario)
         self.page.pack(fill="both", expand=True)
         self.page.start_view()
 
